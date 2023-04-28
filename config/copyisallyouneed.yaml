@@ -1,0 +1,45 @@
+phrase_encoder_tokenizer: 
+    zh: 123
+    en: /apdcephfs/share_916081/ponybwcao/PLM/bert-base-cased
+phrase_encoder_model: 
+    zh: 123
+    en: /apdcephfs/share_916081/ponybwcao/PLM/bert-base-cased
+prefix_encoder_tokenizer: 
+    zh: 123
+    en: /apdcephfs/share_916081/ponybwcao/PLM/GPT2-small
+prefix_encoder_model: 
+    zh: 123
+    en: /apdcephfs/share_916081/ponybwcao/PLM/GPT2-small
+
+# train configuration
+train:
+    dropout: 0.1
+    load_param: true
+    lr: 0.00005
+    grad_clip: 1.0
+    seed: 0
+    batch_size: 1
+    max_len: 256
+    warmup_ratio: 0.
+    iter_to_accumulate: 1
+    max_doc_size: 32
+    buffer_size: 81920
+    total_step: 800010
+    save_every: 40000
+    temp: 1.0
+    min_phrase_length: 1
+    max_phrase_length: 16
+    doc_max_length: 512
+
+# test configuration
+test:
+    seed: 0
+    batch_size: 1
+    prefix_length_rate: 0.5
+    max_gen_len: 128
+    dropout: 0.1
+    doc_topk: 1024
+    # phrase_topk for debug mode
+    phrase_topk: 128
+    left_window_size: 1
+    right_window_size: 8
