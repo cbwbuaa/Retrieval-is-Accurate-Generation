@@ -1,6 +1,6 @@
 from header import *
 import sys
-sys.path.append('/apdcephfs/share_916081/ponybwcao/Copyisallyouneed/data')
+sys.path.append('../data')
 from dpr_1024 import *
 from .agent import top_k_top_p_filtering
 

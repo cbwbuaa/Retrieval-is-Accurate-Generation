@@ -12,7 +12,9 @@ class CopyisallyouneedWikitext103V2DatasetNeg(Dataset):
         self.vocab = AutoTokenizer.from_pretrained(args['prefix_encoder_tokenizer'][args['lang']])
         self.data_root_path = args['data_root_dir']
         # self.file_lists = [f'{self.data_root_path}/dpr_search_result_128_{i}.txt' for i in range(args['data_file_num'])]
-        self.file_lists = [f'/apdcephfs/share_916081/ponybwcao/phrase_extraction/retrieve_doc/output/wikitext103/copyisallyouneed/final_ref_neg1/tokenization_result_{i}.jsonl' for i in range(args['data_file_num'])]
+        self.file_lists = [f'/apdcephfs/share_916081/ponybwcao/phrase_extraction/' \
+                           f'retrieve_doc/output/wikitext103/copyisallyouneed/' \
+                           f'final_ref_neg1/tokenization_result_{i}.jsonl' for i in range(args['data_file_num'])]
         # count the number of the samples
         self.size = 0
         for path in self.file_lists:
@@ -146,8 +148,14 @@ class CopyisallyouneedWikitext103V2DatasetNeg(Dataset):
         bert_batch, phrase_to_doc, phrase_start_index, phrase_end_index = [], [], [], []
         error_label = []
         phrase_doc_dict = {}
+        ''' 0428 YQC edit: start'''
+        phrase_texts = []
+        ''' 0428 YQC edit: end'''
         for doc_id, phrase, start_pos, end_pos, truncate_length, is_pos in docs:
             text = self.base_data[doc_id]
+            ''' 0428 YQC edit: start'''
+            phrase_texts.append(text[start_pos: end_pos])
+            ''' 0428 YQC edit: end'''
             item = self.bert_vocab(text, add_special_tokens=False, return_offsets_mapping=True)
             doc_ids = item['input_ids']
             start_mapping = [s for s, e in item['offset_mapping']]
@@ -194,6 +202,9 @@ class CopyisallyouneedWikitext103V2DatasetNeg(Dataset):
         # process the gpt2_batch
         gpt2_ids, counter, valid_counter = [], 0, 0
         start_labels, end_labels = [], []
+        ''' 0428 YQC edit: start'''
+        valid_phrases = []
+        ''' 0428 YQC edit: end'''
         for text in gpt2_batch:
             phrases = [phrase for phrase, _ in text]
             is_phrase = [label for _, label in text]
@@ -212,6 +223,9 @@ class CopyisallyouneedWikitext103V2DatasetNeg(Dataset):
                     start_ids_[0] = len(self.vocab) + chunk_length + chunk_start_delta
                     end_ids_[0] = len(self.vocab) + chunk_length + chunk_end_delta
                     valid_counter += 1
+                    ''' 0428 YQC edit: start'''
+                    valid_phrases.append(phrase_texts[counter])
+                    ''' 0428 YQC edit: end'''
                 start_labels_.extend(start_ids_)
                 end_labels_.extend(end_ids_)
                 ids.extend(ids_)
@@ -244,14 +258,17 @@ class CopyisallyouneedWikitext103V2DatasetNeg(Dataset):
             pos_mask[i, start_pos:end_pos] = 1
         ###### get the query_pos position
         # labels = (start_labels.reshape(-1) > len(self.vocab)).to(torch.long)
-        return gpt2_ids, start_labels, end_labels, bert_ids, gpt2_mask, bert_mask, pos_mask
+        ''' 0428 YQC edit: start'''
+        return gpt2_ids, start_labels, end_labels, bert_ids, gpt2_mask, bert_mask, pos_mask, valid_phrases
+        ''' 0428 YQC edit: end'''
 
     def save(self):
         pass
         
     def collate(self, batch):
         assert len(batch) == 1
-        gpt2_ids, start_labels, end_labels, bert_ids, gpt2_mask, bert_mask, pos_mask = batch[0]
+        ''' 0428 YQC edit: start'''
+        gpt2_ids, start_labels, end_labels, bert_ids, gpt2_mask, bert_mask, pos_mask, valid_phrases = batch[0]
         return {
             'gpt2_ids': gpt2_ids.cuda(),
             'bert_ids': bert_ids.cuda(),
@@ -259,5 +276,7 @@ class CopyisallyouneedWikitext103V2DatasetNeg(Dataset):
             'bert_mask': bert_mask.cuda(),
             'start_labels': start_labels.cuda(),
             'end_labels': end_labels.cuda(),
-            'pos_mask': pos_mask.cuda()
+            'pos_mask': pos_mask.cuda(),
+            'phrases': valid_phrases
         }
+        ''' 0428 YQC edit: end'''

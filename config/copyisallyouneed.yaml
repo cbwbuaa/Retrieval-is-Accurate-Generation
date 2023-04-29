@@ -1,15 +1,17 @@
-phrase_encoder_tokenizer: 
-    zh: 123
-    en: /apdcephfs/share_916081/ponybwcao/PLM/bert-base-cased
-phrase_encoder_model: 
-    zh: 123
-    en: /apdcephfs/share_916081/ponybwcao/PLM/bert-base-cased
-prefix_encoder_tokenizer: 
-    zh: 123
-    en: /apdcephfs/share_916081/ponybwcao/PLM/GPT2-small
-prefix_encoder_model: 
-    zh: 123
-    en: /apdcephfs/share_916081/ponybwcao/PLM/GPT2-small
+phrase_encoder_tokenizer:
+    zh: bert-base-chinese
+    en: bert-base-cased
+phrase_encoder_model:
+    zh: bert-base-chinese
+    en: bert-base-cased
+prefix_encoder_tokenizer:
+    zh: uer/gpt2-chinese-cluecorpussmall
+    en: gpt2
+prefix_encoder_model:
+    zh: uer/gpt2-chinese-cluecorpussmall
+    en: gpt2
+
+data_file_num: 6
 
 # train configuration
 train:
@@ -24,8 +26,8 @@ train:
     iter_to_accumulate: 1
     max_doc_size: 32
     buffer_size: 81920
-    total_step: 800010
-    save_every: 40000
+    total_step: 400010
+    save_every: 20000
     temp: 1.0
     min_phrase_length: 1
     max_phrase_length: 16

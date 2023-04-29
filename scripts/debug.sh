@@ -1,0 +1,1 @@
+./scripts/train.sh wikitext103 copyisallyouneed 7
