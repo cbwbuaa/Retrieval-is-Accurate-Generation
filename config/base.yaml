@@ -6,8 +6,13 @@ datasets:
 
 models:
     copyisallyouneed: 
-        model_name: Copyisallyouneed
-        dataset_name: CopyisallyouneedWikitext103V2DatasetNeg
+        model_name: 
+            pretrain: CopyisallyouneedPretrain
+            train: Copyisallyouneed
+        dataset_name: 
+            pretrain: CopyisallyouneedWikitext103V2DatasetPretrain
+            train: CopyisallyouneedWikitext103V2Dataset
+            train_neg: CopyisallyouneedWikitext103V2DatasetNeg
     gpt2:
         model_name: GPT2Baseline
         # dataset_name: GPT2Dataset

@@ -32,7 +32,7 @@ def main(**args):
     
     if args['local_rank'] == 0:
         sum_writer = SummaryWriter(
-            log_dir=f'{args["root_dir"]}/rest/{args["dataset"]}/{args["model"]}/{args["version"]}',
+            log_dir=f'{args["root_dir"]}/rest/{args["dataset"]}/{args["model"]}/{args["mode"]}/{args["version"]}',
         )
     else:
         sum_writer = None
@@ -54,7 +54,7 @@ def main(**args):
                 pbar=pbar
             )
             if args['global_rank'] == 0 and current_step % args['save_every'] == 0 and current_step > 0:
-                save_path = f'{args["root_dir"]}/ckpt/{args["dataset"]}/{args["model"]}/best_{args["version"]}_{current_step}.pt'
+                save_path = f'{args["root_dir"]}/ckpt/{args["dataset"]}/{args["model"]}/{args{"mode"}}/best_{args["version"]}_{current_step}.pt'
                 agent.save_model_long(save_path, current_step)
             current_step += 1
             if current_step > args['total_step']:

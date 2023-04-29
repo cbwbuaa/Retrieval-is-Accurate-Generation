@@ -14,8 +14,7 @@ class Agent:
 
         if torch.cuda.is_available():
             self.model.cuda()
-
-        if args['mode'] in ['train']:
+        if args['mode'] in ['train', 'pretrain']:
             self.set_optimizer_scheduler_ddp()
         if args['model'] == 'gpt2':
             self.train_model = self.train_model_gpt2
@@ -23,23 +22,22 @@ class Agent:
             self.load_latest_checkpoint()
 
     def set_optimizer_scheduler_ddp(self):
-        if self.args['mode'] in ['train']:
-            self.optimizer = transformers.AdamW(
-                self.model.parameters(), 
-                lr=self.args['lr'],
-            )
-            self.scaler = GradScaler()
-            self.scheduler = transformers.get_linear_schedule_with_warmup(
-                self.optimizer, 
-                num_warmup_steps=self.args['warmup_step'], 
-                num_training_steps=self.args['total_step'],
-            )
-            self.model = nn.parallel.DistributedDataParallel(
-                self.model, 
-                device_ids=[self.args['local_rank']], 
-                output_device=self.args['local_rank'],
-                find_unused_parameters=True,
-            )
+        self.optimizer = transformers.AdamW(
+            self.model.parameters(), 
+            lr=self.args['lr'],
+        )
+        self.scaler = GradScaler()
+        self.scheduler = transformers.get_linear_schedule_with_warmup(
+            self.optimizer, 
+            num_warmup_steps=self.args['warmup_step'], 
+            num_training_steps=self.args['total_step'],
+        )
+        self.model = nn.parallel.DistributedDataParallel(
+            self.model, 
+            device_ids=[self.args['local_rank']], 
+            output_device=self.args['local_rank'],
+            find_unused_parameters=True,
+        )
 
     def load_model(self, path):
         if self.args['mode'] == 'train':
@@ -85,6 +83,31 @@ class Agent:
             recoder.add_scalar(f'train/phrase_start_acc', phrase_start_acc, current_step)
             recoder.add_scalar(f'train/phrase_end_acc', phrase_end_acc, current_step)
         pbar.set_description(f'[!] loss(s|e): {round(loss_1.item(), 4)}|{round(loss_2.item(), 4)}; acc: {round((token_start_acc+token_end_acc)/2, 4)}|{round((phrase_start_acc+phrase_end_acc)/2, 4)}')
+        pbar.update(1)
+
+    def pretrain_model(self, batch, recoder=None, current_step=0, pbar=None):
+        self.model.train()
+        with autocast():
+            batch['current_step'] = current_step
+            s_loss, e_loss, s_acc, e_acc = self.model(batch)
+            loss = s_loss + e_loss
+            loss = loss / self.args['iter_to_accumulate']
+        self.scaler.scale(loss).backward()
+        if (current_step + 1) % self.args['iter_to_accumulate'] == 0:
+            self.scaler.unscale_(self.optimizer)
+            clip_grad_norm_(self.model.parameters(), self.args['grad_clip'])
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+            self.scheduler.step()
+            self.optimizer.zero_grad()
+
+        if recoder:
+            recoder.add_scalar(f'train/Loss', loss.item(), current_step)
+            recoder.add_scalar(f'train/start_loss', s_loss.item(), current_step)
+            recoder.add_scalar(f'train/end_loss', e_loss.item(), current_step)
+            recoder.add_scalar(f'train/phrase_start_acc', s_acc.item(), current_step)
+            recoder.add_scalar(f'train/phrase_end_acc', e_acc.item(), current_step)
+        pbar.set_description(f'[!] loss(s|e): {round(s_loss.item(), 4)}|{round(e_loss.item(), 4)}; acc: {round(s_acc.item(), 4)}|{round(e_acc.item(), 4)}')
         pbar.update(1)
 
     def load_latest_checkpoint(self):
@@ -271,6 +294,50 @@ class Agent:
         # get textual candidate
         if type(candidate) == list:
             candidate = ' ' + self.model.bert_tokenizer.decode(candidate).replace('[UNK]', '<|endoftext|>')
+            sub_ids = self.model.tokenizer.encode(candidate, add_special_tokens=False)
+        else:
+            sub_ids = [candidate]
+        sub_ids = torch.LongTensor(sub_ids).unsqueeze(0).cuda()
+        ids = torch.cat((ids, sub_ids), dim=-1)
+        return ids, candidate
+
+    @torch.no_grad()
+    def retrieve_one_phrase(self, text, retriever, phrase_sources, decoding_method='greedy', top_k=0, top_p=0.95, temp=1.0, get_time_cost=False):
+        self.model.eval()
+        ids = self.model.tokenizer(text, return_tensors='pt', add_special_tokens=False)['input_ids'].cuda()
+        prefix_length = len(ids[0])
+        candidates = []
+        bt = time.time()
+        while len(ids[0]) <= prefix_length + self.args['max_gen_len']:
+            ids, candidate = self.retrieve_one_step_fast(ids, retriever, phrase_sources, decoding_method=decoding_method, top_k=top_k, top_p=top_p, temp=temp)
+            candidates.append(candidate)
+        inference_time = time.time() - bt
+        if get_time_cost:
+            return self.model.tokenizer.decode(ids[0, prefix_length:]), candidates, inference_time
+        else:
+            return self.model.tokenizer.decode(ids[0, prefix_length:]), candidates, None
+
+    @torch.no_grad()
+    def retrieve_one_step_fast(self, ids, retriever, phrase_sources, decoding_method='greedy', temp=1., top_k=0, top_p=0.92):
+        self.model.eval()
+        query = self.model.get_query_rep(ids).cpu().numpy()
+        if decoding_method == 'greedy':
+            D, I = retriever.search(query, 1)
+            index = I[0][0]
+            candidate = phrase_sources[index]
+        elif decoding_method == 'nucleus_sampling':
+            score = top_k_top_p_filtering(score, top_k=top_k, top_p=top_p)
+            index = torch.multinomial(F.softmax(score/temp, dim=-1), num_samples=1).item()
+            candidate = phrase_sources[index]
+        else:
+            pass
+
+        # get textual candidate
+        if type(candidate) == list:
+            candidate = ' ' + self.model.bert_tokenizer.decode(candidate).replace('[UNK]', '<|endoftext|>')
+            sub_ids = self.model.tokenizer.encode(candidate, add_special_tokens=False)
+        elif type(candidate) == str:
+            candidate = ' ' + candidate
             sub_ids = self.model.tokenizer.encode(candidate, add_special_tokens=False)
         else:
             sub_ids = [candidate]

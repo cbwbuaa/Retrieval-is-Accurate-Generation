@@ -22,7 +22,8 @@ def parser_args():
     parser = argparse.ArgumentParser(description='train parameters')
     parser.add_argument('--dataset', default='wikitext103', type=str)
     parser.add_argument('--model', type=str, default='copyisallyouneed')
-    parser.add_argument('--model_name', type=str)
+    parser.add_argument('--model_name', type=str, default='best_2004_400000')
+    parser.add_argument('--decoding_method', type=str, default='greedy')
     parser.add_argument('--local_rank', type=int)
     parser.add_argument('--mode', type=str)
     return parser.parse_args()
@@ -73,32 +74,72 @@ def encode_phrase(**args):
         
         save_emb({'phrase': phrase_result, 'embedding': phrase_emb_tensor}, f'/apdcephfs/share_916081/ponybwcao/phrase_extraction/retrieve_doc/output/wikitext103/copyisallyouneed/phrase_index/remove_word_400000/phrase_{idx}.pkl')
 
-def build_index():
+def generation(**args):
+    args['mode'] = 'test'
+    config = load_config(args)
+    args.update(config)
+    agent = load_model(args)
+    agent.load_model(f'{args["root_dir"]}/ckpt/wikitext103/copyisallyouneed/{args["model_name"]}.pt')
+    print(f'[!] init model over')
+
+    # get deliminater embeddings
+    deliminater_list = [',', '.', ';', '?', '!', '\'', '`', '[', ']', '<', '>', ':', '"', '{', '}', '(', ')', '^']
+    deliminater_index = [agent.model.tokenizer.encode(deliminater, add_special_tokens=False)[0] for deliminater in deliminater_list]
+    deliminater_emb = agent.model.token_embeddings[deliminater_index].cpu().detach().numpy()
+    
     idx = 0
+    # phrase_result = load_emb(f'/apdcephfs/share_916081/ponybwcao/phrase_extraction/retrieve_doc/output/wikitext103/copyisallyouneed/phrase_index/remove_word_400000/phrase_test.pkl')
     phrase_result = load_emb(f'/apdcephfs/share_916081/ponybwcao/phrase_extraction/retrieve_doc/output/wikitext103/copyisallyouneed/phrase_index/remove_word_400000/phrase_{idx}.pkl')
     phrase_list, phrase_emb = phrase_result['phrase'], phrase_result['embedding']
-    n, d = phrase_emb.shape
-    index = faiss.IndexHNSWFlat(d, 32)
-    # this is the default, higher is more accurate and slower to construct
-    index.hnsw.efConstruction = 40
-    index.hnsw.efSearch = 256
-    index.add(phrase_emb)
-    xq = phrase_emb[:10]
+    phrase_list += deliminater_list
+    phrase_emb = np.vstack((phrase_emb, deliminater_emb))
 
-    t1 = time()
-    D, I = index.search(xq, 1)
-    t2 = time()
-    print(t2 - t1, I)
+    n, d = phrase_emb.shape
+    retriever = faiss.IndexHNSWFlat(d, 32)
+    # this is the default, higher is more accurate and slower to construct
+    retriever.hnsw.efConstruction = 40
+    retriever.hnsw.efSearch = 256
+    retriever.add(phrase_emb)
+    # res = faiss.StandardGpuResources()
+    # retriever = faiss.index_cpu_to_gpu(res, 0, retriever)
+    print(f'[!] init retriever over')
+
+    collection = []
+    with open(f'../data/wikitext103_1024/test.txt') as f:
+        # collect the valid prefixes
+        texts = []
+        for line in tqdm(f.readlines()):
+            ids = agent.model.tokenizer.encode(line, add_special_tokens=False)
+            prefix, reference = ids[:32], ids[32:]
+            if len(prefix) == 32:
+                prefix = agent.model.tokenizer.decode(prefix)
+                reference = agent.model.tokenizer.decode(reference)
+                texts.append((prefix, reference))
+        print(f'[!] collect {len(texts)} valid samples which have at least 32 tokens in prefix')
+
+        for prefix, reference in tqdm(texts):
+            text, candidates, time_cost = agent.retrieve_one_phrase(prefix, retriever, phrase_list, decoding_method=args["decoding_method"], top_k=0, top_p=0.95, temp=1., get_time_cost=True)
+            print(prefix)
+            print(text)
+            print(candidates)
+            exit()
+            collection.append({
+                'prefix': prefix, 
+                'reference': reference, 
+                'text': text, 
+                'phrases': candidates,
+                'time_cost': time_cost
+            })
+    return collection
 
     
 if __name__ == "__main__":
     args = vars(parser_args())
-    torch.cuda.set_device(args['local_rank'])
-    torch.distributed.init_process_group(backend='nccl', init_method='env://')
-
     if args['mode'] == 'encode':
+        torch.cuda.set_device(args['local_rank'])
+        torch.distributed.init_process_group(backend='nccl', init_method='env://')
         encode_phrase(**args)
-    elif args['mode'] == 'index':
-        build_index()
+    elif args['mode'] == 'generation':
+        generation(**args)
     else:
         exit('Not implemented.')

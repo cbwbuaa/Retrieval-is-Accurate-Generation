@@ -11,6 +11,24 @@ prefix_encoder_model:
     zh: 123
     en: /apdcephfs/share_916081/ponybwcao/PLM/GPT2-small
 
+# pretrain configuration
+pretrain:
+    dropout: 0.1
+    load_param: true
+    lr: 0.00005
+    grad_clip: 1.0
+    seed: 0
+    batch_size: 1
+    max_len: 256
+    warmup_ratio: 0.
+    iter_to_accumulate: 1
+    max_doc_size: 32
+    buffer_size: 81920
+    total_step: 100001
+    save_every: 10000
+    temp: 1.0
+    doc_max_length: 512
+
 # train configuration
 train:
     dropout: 0.1

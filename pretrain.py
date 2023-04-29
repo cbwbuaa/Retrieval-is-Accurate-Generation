@@ -6,14 +6,14 @@ from config import *
 
 def parser_args():
     parser = argparse.ArgumentParser(description='train parameters')
-    parser.add_argument('--dataset', default='ecommerce', type=str)
-    parser.add_argument('--model', type=str)
-    parser.add_argument('--version', type=str)
+    parser.add_argument('--dataset', default='wiki103', type=str)
+    parser.add_argument('--model', type=str, default='copyisallyouneed')
+    parser.add_argument('--version', type=str, default='test')
     parser.add_argument('--multi_gpu', type=str, default=None)
-    parser.add_argument('--local_rank', type=int)
+    parser.add_argument('--local_rank', type=int, default=-1)
     parser.add_argument('--total_workers', type=int)
-    parser.add_argument('--resume', type=bool, default=True)
-    parser.add_argument('--data_file_num', type=int, default=6)
+    parser.add_argument('--resume', type=bool, default=False)
+    parser.add_argument('--data_file_num', type=int, default=8)
     return parser.parse_args()
 
 
@@ -32,7 +32,7 @@ def main(**args):
     
     if args['local_rank'] == 0:
         sum_writer = SummaryWriter(
-            log_dir=f'{args["root_dir"]}/rest/{args["dataset"]}/{args["model"]}/{args["version"]}',
+            log_dir=f'{args["root_dir"]}/rest/{args["dataset"]}/{args["model"]}/{args["mode"]}/{args["version"]}',
         )
     else:
         sum_writer = None
@@ -47,14 +47,14 @@ def main(**args):
         print(f'[!] load latest step: {current_step}')
     for _ in range(100000000):
         for batch in train_iter:
-            agent.train_model(
+            agent.pretrain_model(
                 batch, 
                 recoder=sum_writer, 
                 current_step=current_step, 
                 pbar=pbar
             )
             if args['global_rank'] == 0 and current_step % args['save_every'] == 0 and current_step > 0:
-                save_path = f'{args["root_dir"]}/ckpt/{args["dataset"]}/{args["model"]}/best_{args["version"]}_{current_step}.pt'
+                save_path = f'{args["root_dir"]}/ckpt/{args["dataset"]}/{args["model"]}/{args["mode"]}/best_{args["version"]}_{current_step}.pt'
                 agent.save_model_long(save_path, current_step)
             current_step += 1
             if current_step > args['total_step']:
