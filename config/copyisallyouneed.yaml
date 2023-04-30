@@ -24,7 +24,7 @@ pretrain:
     iter_to_accumulate: 1
     max_doc_size: 32
     buffer_size: 81920
-    total_step: 100001
+    total_step: 400001
     save_every: 10000
     temp: 1.0
     doc_max_length: 512
@@ -40,13 +40,12 @@ train:
     max_len: 256
     warmup_ratio: 0.
     iter_to_accumulate: 1
-    max_doc_size: 32
+    max_doc_size: 28
+    prebatch_phrase_num: 1024
     buffer_size: 81920
-    total_step: 800010
-    save_every: 40000
+    total_step: 400010
+    save_every: 20000
     temp: 1.0
-    min_phrase_length: 1
-    max_phrase_length: 16
     doc_max_length: 512
 
 # test configuration

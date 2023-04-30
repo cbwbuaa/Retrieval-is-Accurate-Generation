@@ -27,7 +27,7 @@ root_dir=/apdcephfs/share_916081/ponybwcao/Copyisallyouneed
 version=test
 
 # backup
-recoder_file=$root_dir/rest/$dataset/$model/recoder_$version.txt
+recoder_file=$root_dir/rest/$dataset/$model/recoder_pretrain_$version.txt
 
 # echo "find root_dir: $root_dir"
 # echo "find version: $version"
@@ -45,5 +45,6 @@ CUDA_VISIBLE_DEVICES=$cuda python3 -m torch.distributed.launch --nproc_per_node=
     --multi_gpu $cuda \
     --total_workers ${#gpu_ids[@]} \
     --data_file_num 8 \
-    --version $version 
+    --version $version \
+    --resume true
 

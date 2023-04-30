@@ -1,6 +1,7 @@
 from .agent import Agent
 from .copyisallyouneed import Copyisallyouneed
 from .copyisallyouneed_pretrain import CopyisallyouneedPretrain
+from .copyisallyouneed_prebatch import CopyisallyouneedNegPrebatch
 from .gpt2 import GPT2Baseline
 from .knnlm import KNNLMBaseline
 import ipdb

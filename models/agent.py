@@ -8,9 +8,9 @@ class Agent:
         self.args = args
         self.model = model
         if 'resume' in args:
-            self.load_last_step = args['resume']
+            self.load_last_step = args["resume"]
         else:
-            self.load_last_step = None
+            self.load_last_step = False
 
         if torch.cuda.is_available():
             self.model.cuda()
@@ -20,6 +20,9 @@ class Agent:
             self.train_model = self.train_model_gpt2
         if self.load_last_step:
             self.load_latest_checkpoint()
+        else:
+            if 'pretrain_model_path' in args and args["pretrain_model_path"] is not None:
+                self.load_pretrain_model(args["pretrain_model_path"])
 
     def set_optimizer_scheduler_ddp(self):
         self.optimizer = transformers.AdamW(
@@ -40,21 +43,26 @@ class Agent:
         )
 
     def load_model(self, path):
-        if self.args['mode'] == 'train':
+        if self.args['mode'] in ['train', 'pretrain']:
             state_dict = torch.load(path, map_location=torch.device('cpu'))
             model_state_dict = state_dict['model_state_dict']
             self.model.module.load_state_dict(model_state_dict)
             self.load_last_step = state_dict['step']
             self.scheduler.load_state_dict(state_dict['scheduler_state_dict'])
             self.optimizer.load_state_dict(state_dict['optimizer_state_dict'])
-            print(f'[!] load the latest model from {path}')
         else:
             state_dict = torch.load(path, map_location=torch.device('cpu'))['model_state_dict']
             try:
                 self.model.module.load_state_dict(state_dict)
             except:
                 self.model.load_state_dict(state_dict)
-        print(f'[!] load model from {path}')
+        print(f'[!] resume model from {path}')
+    
+    def load_pretrain_model(self, path):
+        state_dict = torch.load(path, map_location=torch.device('cpu'))
+        model_state_dict = state_dict['model_state_dict']
+        self.model.module.load_state_dict(model_state_dict, strict=False)
+        print(f'[!] load pretrained model from {path}')
     
     def train_model(self, batch, recoder=None, current_step=0, pbar=None):
         self.model.train()
@@ -111,7 +119,7 @@ class Agent:
         pbar.update(1)
 
     def load_latest_checkpoint(self):
-        path = f'{self.args["root_dir"]}/ckpt/{self.args["dataset"]}/{self.args["model"]}'
+        path = f'{self.args["root_dir"]}/ckpt/{self.args["dataset"]}/{self.args["model"]}/{self.args["mode"]}'
         prefix_name = f'best_{self.args["version"]}_'
         checkpoints = []
         for file in os.listdir(path):

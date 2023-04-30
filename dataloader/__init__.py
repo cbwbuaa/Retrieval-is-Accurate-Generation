@@ -1,7 +1,7 @@
-from .copyisallyouneed_dataloader import *
-from .copyisallyouneed_dataloader_update import *
-from .copyisallyouneed_dataloader_neg import *
-from .copyisallyouneed_dataloader_pretrain import *
+from .dataloader_update import *
+from .dataloader_neg import *
+from .dataloader_pretrain import *
+from .dataloader_neg_prebatch import *
 from .gpt2_dataloader import *
 from .knnlm_dataloader import *
 

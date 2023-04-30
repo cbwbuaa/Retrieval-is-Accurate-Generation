@@ -9,10 +9,11 @@ def parser_args():
     parser.add_argument('--dataset', default='ecommerce', type=str)
     parser.add_argument('--model', type=str)
     parser.add_argument('--version', type=str)
+    parser.add_argument('--pretrain_model_path', type=str)
     parser.add_argument('--multi_gpu', type=str, default=None)
     parser.add_argument('--local_rank', type=int)
     parser.add_argument('--total_workers', type=int)
-    parser.add_argument('--resume', type=bool, default=True)
+    parser.add_argument('--resume', type=bool, default=False)
     parser.add_argument('--data_file_num', type=int, default=6)
     return parser.parse_args()
 
@@ -54,7 +55,7 @@ def main(**args):
                 pbar=pbar
             )
             if args['global_rank'] == 0 and current_step % args['save_every'] == 0 and current_step > 0:
-                save_path = f'{args["root_dir"]}/ckpt/{args["dataset"]}/{args["model"]}/{args{"mode"}}/best_{args["version"]}_{current_step}.pt'
+                save_path = f'{args["root_dir"]}/ckpt/{args["dataset"]}/{args["model"]}/{args["mode"]}/best_{args["version"]}_{current_step}.pt'
                 agent.save_model_long(save_path, current_step)
             current_step += 1
             if current_step > args['total_step']:

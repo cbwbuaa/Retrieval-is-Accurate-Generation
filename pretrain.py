@@ -45,7 +45,7 @@ def main(**args):
     if agent.load_last_step:
         current_step = agent.load_last_step + 1
         print(f'[!] load latest step: {current_step}')
-    for _ in range(100000000):
+    for _ in range(current_step, 100000000):
         for batch in train_iter:
             agent.pretrain_model(
                 batch, 
