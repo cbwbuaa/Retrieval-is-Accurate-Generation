@@ -41,7 +41,7 @@ train:
     warmup_ratio: 0.
     iter_to_accumulate: 1
     max_doc_size: 28
-    prebatch_phrase_num: 1024
+    prebatch_phrase_num: 2048
     buffer_size: 81920
     total_step: 400010
     save_every: 20000

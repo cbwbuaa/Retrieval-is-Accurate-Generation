@@ -51,7 +51,9 @@ class CopyisallyouneedNegPrebatch(nn.Module):
 
     ''' 0428 YQC edit: start'''
     def _update_prebatch_phrase(self, cur_phrase_emb, cur_phrase_text):
-        for emb, text in zip(cur_phrase_emb, cur_phrase_text):
+        for idx in range(len(cur_phrase_text)):
+            emb = cur_phrase_emb[idx]
+            text = cur_phrase_text[idx]
             if len(self.pre_batch_phrases) >= self.pre_batch_queue_size:
                 self.pre_batch_phrases.pop(0)
             self.pre_batch_phrases.append((emb, text))

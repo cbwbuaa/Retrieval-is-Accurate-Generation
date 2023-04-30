@@ -81,7 +81,6 @@ class CopyisallyouneedWikitext103V2DatasetNegPrebatch(Dataset):
                 self.load_one_part()
             item = self.cache[0]
             base_index = item['index']
-
             cache_phrase, delta = [], 0
             for phrase, metadata in item['results'][self.last_delta:]:
                 if metadata and delta > 0:
@@ -107,13 +106,12 @@ class CopyisallyouneedWikitext103V2DatasetNegPrebatch(Dataset):
                     cache_phrase.append((phrase, 0))
 
                 if counter >= self.args['max_doc_size']:
-                    self.last_delta = delta
+                    self.last_delta += delta
                     self.if_last_over = False
                     break
                 delta += 1
             else:
                 self.if_last_over = True
-
             # update the cache
             if self.if_last_over is True:
                 self.last_delta = 0
