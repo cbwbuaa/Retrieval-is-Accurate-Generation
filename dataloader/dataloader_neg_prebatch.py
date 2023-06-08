@@ -10,7 +10,7 @@ class CopyisallyouneedWikitext103V2DatasetNegPrebatch(Dataset):
         self.prefix_token_id = self.bert_vocab.convert_tokens_to_ids('[PREFIX]')
         self.vocab = AutoTokenizer.from_pretrained(args['prefix_encoder_tokenizer'][args['lang']])
         self.data_root_path = args['data_root_dir']
-        self.file_lists = [f'/apdcephfs/share_916081/ponybwcao/phrase_extraction/retrieve_doc/output/wikitext103/copyisallyouneed/ref_data/8split_0neg/tokenization_result_{i}.jsonl' for i in range(args['data_file_num'])]
+        self.file_lists = [f'{args["training_data_dir"]}/tokenization_result_{i}.jsonl' for i in range(args['data_file_num'])]
         # count the number of the samples
         self.size = 0
         for path in self.file_lists:
@@ -76,6 +76,7 @@ class CopyisallyouneedWikitext103V2DatasetNegPrebatch(Dataset):
         '''
 
         gpt2_batch, cache_doc, docs, counter = [], set(), [], 0
+        doc_cache = set()
         while counter < self.args['max_doc_size']:
             if len(self.cache) == 0:
                 self.load_one_part()
@@ -94,8 +95,9 @@ class CopyisallyouneedWikitext103V2DatasetNegPrebatch(Dataset):
                         truncate_length = None
                         cache_doc.add(doc)
                         docs.append((doc, phrase_, start_pos, end_pos, truncate_length, ref_idx == 0))
-                        
-                        counter += 1
+                        doc_cache.add(doc)
+                        # counter += 1
+                        counter = len(doc_cache)
 
                     # save the phrase and its map to the cache_doc
                     cache_phrase.append((phrase_, 1))
@@ -140,7 +142,8 @@ class CopyisallyouneedWikitext103V2DatasetNegPrebatch(Dataset):
                 end_index = end_mapping.index(end_pos)
             except:
                 # wrong phrase, not consider
-                error_label.append(True)
+                if is_pos:
+                    error_label.append(True)
                 continue
             # target_phrase = ' ' + self.bert_vocab.decode(doc_ids[start_index:end_index+1])
             # assert phrase == target_phrase, f'{phrase} {target_phrase}'
@@ -160,7 +163,7 @@ class CopyisallyouneedWikitext103V2DatasetNegPrebatch(Dataset):
             if is_pos:
                 phrase_start_index.append(start_index + 1)
                 phrase_end_index.append(end_index + 1)
-            error_label.append(False)
+                error_label.append(False)
         max_bert_length = max([len(i) for i in bert_batch])
         # process the gpt2_batch
         gpt2_ids, counter, valid_counter = [], 0, 0
@@ -197,7 +200,12 @@ class CopyisallyouneedWikitext103V2DatasetNegPrebatch(Dataset):
             gpt2_ids.append(ids)
             start_labels.append(start_labels_)
             end_labels.append(end_labels_)
-        assert counter == len(phrase_to_doc) + sum(error_label)
+        try:
+            assert counter == len(phrase_to_doc) + sum(error_label)
+        except:
+            print(len(phrase_to_doc), sum(error_label))
+            print(counter)
+            exit('buggy')
         query_num = counter - sum(error_label)
             
         ######
@@ -208,7 +216,6 @@ class CopyisallyouneedWikitext103V2DatasetNegPrebatch(Dataset):
         bert_ids = pad_sequence([torch.LongTensor(i) for i in bert_batch], padding_value=self.bert_vocab.pad_token_id, batch_first=True)
         gpt2_mask = generate_mask(gpt2_ids, pad_token_idx=self.vocab.eos_token_id)
         bert_mask = generate_mask(bert_ids, pad_token_idx=self.bert_vocab.pad_token_id)
-        
         ###### prepare the document mask (only for the query position)
         ###### [Q, N_p]
         total_phrase_num = bert_ids.size(0) * bert_ids.size(1)

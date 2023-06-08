@@ -7,7 +7,7 @@ def load_model_config(model, mode):
         configuration = yaml.load(f, Loader=yaml.FullLoader)
         new_config = {}
         for key, value in configuration.items():
-            if key in ['train', 'test', 'inference', 'pretrain']:
+            if key in ['train', 'train_asyn', 'train_pipeline', 'test', 'inference', 'pretrain', 'queryside', 'baseline']:
                 if mode == key:
                     new_config.update(value)
             else:

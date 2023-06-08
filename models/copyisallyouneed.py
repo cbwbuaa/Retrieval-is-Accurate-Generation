@@ -24,19 +24,18 @@ class Copyisallyouneed(nn.Module):
 
         self.model = GPT2LMHeadModel.from_pretrained(self.args['prefix_encoder_model'][self.args['lang']])
         self.token_embeddings = nn.Parameter(list(self.model.lm_head.parameters())[0])
-        prefix_encoder_hidden_size = self.model.hidden_size
 
         # MLP: mapping bert phrase start representations
         self.s_proj = nn.Sequential(
             nn.Dropout(p=args['dropout']),
             nn.Tanh(),
-            nn.Linear(prefix_encoder_hidden_size, prefix_encoder_hidden_size // 2)
+            nn.Linear(self.model.config.hidden_size, self.model.config.hidden_size // 2)
         )
         # MLP: mapping bert phrase end representations
         self.e_proj = nn.Sequential(
             nn.Dropout(p=args['dropout']),
             nn.Tanh(),
-            nn.Linear(prefix_encoder_hidden_size, prefix_encoder_hidden_size // 2)
+            nn.Linear(self.model.config.hidden_size, self.model.config.hidden_size // 2)
         )
         self.gen_loss_fct = nn.CrossEntropyLoss(ignore_index=self.pad)
 

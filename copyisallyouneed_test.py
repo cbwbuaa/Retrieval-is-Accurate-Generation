@@ -11,7 +11,8 @@ def parser_args():
     parser = argparse.ArgumentParser(description='train parameters')
     parser.add_argument('--dataset', default='ecommerce', type=str)
     parser.add_argument('--model', type=str)
-    parser.add_argument('--model_name', type=str)
+    parser.add_argument('--model_name', type=str, default='train')
+    parser.add_argument('--training_mode', type=str)
     parser.add_argument('--decoding_method', type=str)
     parser.add_argument('--recall_topk', type=int, default=20)
     return parser.parse_args()
@@ -23,7 +24,7 @@ def main_generation(**args):
     config = load_config(args)
     args.update(config)
     agent = load_model(args)
-    agent.load_model(f'{args["root_dir"]}/ckpt/wikitext103/copyisallyouneed/{args["model_name"]}.pt')
+    agent.load_model(f'{args["root_dir"]}/ckpt/wikitext103/copyisallyouneed/{args["training_mode"]}/{args["model_name"]}.pt')
     print(f'[!] init model over')
 
     collection = []
@@ -41,8 +42,18 @@ def main_generation(**args):
                 texts.append((prefix, reference))
         print(f'[!] collect {len(texts)} valid samples which have at least 32 tokens in prefix')
 
+        cnt = 0
         for prefix, reference in tqdm(texts):
+            # print(prefix)
             text, candidates, time_cost = agent.generate_one_sample(prefix, retriever, decoding_method=args["decoding_method"], top_k=0, top_p=0.95, temp=1., get_time_cost=True)
+            # print('prefix:', prefix)
+            # print('reference:', reference)
+            # print('text:', text)
+            # print('candidates:', candidates)
+            # print('time_cost:', time_cost)
+            # cnt += 1
+            # if cnt == 20:
+            #     exit()
             collection.append({
                 'prefix': prefix, 
                 'reference': reference, 
@@ -55,5 +66,5 @@ def main_generation(**args):
 if __name__ == "__main__":
     args = vars(parser_args())
     result = main_generation(**args)
-    with open(f'raw_files/random_runs_en_wiki_testset/{args["dataset"]}_copy_{args["decoding_method"]}_{args["model_name"]}.json', 'w') as f:
-        json.dump(result, f, indent=4)
+    with open(f'/apdcephfs/share_916081/shared_info/ponybwcao/Copyisallyouneed/raw_files/random_runs_en_wiki_testset/{args["dataset"]}_copy_{args["decoding_method"]}_{args["training_mode"]}_{args["model_name"]}.json', 'w') as f:
+        json.dump(result, f, indent=4, ensure_ascii=False)

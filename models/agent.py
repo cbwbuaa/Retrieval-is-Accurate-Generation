@@ -1,6 +1,7 @@
 from header import *
-import spacy
-
+import spacy, random, collections
+from .util_func import *
+from time import time
 class Agent:
     
     def __init__(self, model, args):
@@ -14,7 +15,7 @@ class Agent:
 
         if torch.cuda.is_available():
             self.model.cuda()
-        if args['mode'] in ['train', 'pretrain']:
+        if args['mode'] in ['train', 'train_asyn', 'train_pipeline', 'pretrain', 'queryside', 'baseline']:
             self.set_optimizer_scheduler_ddp()
         if args['model'] == 'gpt2':
             self.train_model = self.train_model_gpt2
@@ -23,6 +24,21 @@ class Agent:
         else:
             if 'pretrain_model_path' in args and args["pretrain_model_path"] is not None:
                 self.load_pretrain_model(args["pretrain_model_path"])
+            if 'trained_model_path' in args and args["trained_model_path"] is not None:
+                self.load_trained_model(args["trained_model_path"])
+        self.result = collections.defaultdict(int)
+
+    def evaluate_model(self, current_step):
+        self.model.eval()
+        print('[!] evaluating step', current_step)
+        all_result, tok_counter, phrase_counter = self.model.module.evaluate(quiet=True)
+        with open(f'{self.args["log_dir"]}/{self.args["mode"]}/{self.args["version"]}.log', 'a') as fLog:
+            fLog.write(f'step: {current_step}\n')
+            for k, v in all_result.items():
+                if 'token' in k:
+                    fLog.write('%s: %.4f\n' % (k, v / tok_counter))
+                else:
+                    fLog.write('%s: %.4f\n' % (k, v / phrase_counter))
 
     def set_optimizer_scheduler_ddp(self):
         self.optimizer = transformers.AdamW(
@@ -35,15 +51,16 @@ class Agent:
             num_warmup_steps=self.args['warmup_step'], 
             num_training_steps=self.args['total_step'],
         )
+        find_unused_parameters = True if self.args['mode'] != 'queryside' else False
         self.model = nn.parallel.DistributedDataParallel(
             self.model, 
             device_ids=[self.args['local_rank']], 
             output_device=self.args['local_rank'],
-            find_unused_parameters=True,
+            find_unused_parameters=find_unused_parameters,
         )
 
     def load_model(self, path):
-        if self.args['mode'] in ['train', 'pretrain']:
+        if self.args['mode'] in ['train', 'pretrain', 'train_asyn', 'train_pipeline']:
             state_dict = torch.load(path, map_location=torch.device('cpu'))
             model_state_dict = state_dict['model_state_dict']
             self.model.module.load_state_dict(model_state_dict)
@@ -51,21 +68,32 @@ class Agent:
             self.scheduler.load_state_dict(state_dict['scheduler_state_dict'])
             self.optimizer.load_state_dict(state_dict['optimizer_state_dict'])
         else:
+            strict = False #self.args['mode'] == 'queryside'
             state_dict = torch.load(path, map_location=torch.device('cpu'))['model_state_dict']
+            # print([x[0] for x in self.model.named_parameters()])
+            # print('*' * 10)
+            # print(list(state_dict.keys()))
             try:
-                self.model.module.load_state_dict(state_dict)
+                self.model.module.load_state_dict(state_dict, strict=strict)
             except:
-                self.model.load_state_dict(state_dict)
+                self.model.load_state_dict(state_dict, strict=strict)
         print(f'[!] resume model from {path}')
     
     def load_pretrain_model(self, path):
         state_dict = torch.load(path, map_location=torch.device('cpu'))
         model_state_dict = state_dict['model_state_dict']
-        self.model.module.load_state_dict(model_state_dict, strict=False)
+        self.model.module.load_state_dict(model_state_dict, strict=True)
         print(f'[!] load pretrained model from {path}')
     
-    def train_model(self, batch, recoder=None, current_step=0, pbar=None):
+    def load_trained_model(self, path):
+        state_dict = torch.load(path, map_location=torch.device('cpu'))
+        model_state_dict = state_dict['model_state_dict']
+        self.model.module.load_state_dict(model_state_dict, strict=True)
+        print(f'[!] load trained model from {path}')
+    
+    def _train_model(self, batch, recoder=None, current_step=0, pbar=None):
         self.model.train()
+        self.optimizer.zero_grad()
         with autocast():
             batch['current_step'] = current_step
             loss_0, loss_1, loss_2, acc_0, phrase_start_acc, phrase_end_acc, token_start_acc, token_end_acc = self.model(batch)
@@ -78,9 +106,10 @@ class Agent:
             self.scaler.step(self.optimizer)
             self.scaler.update()
             self.scheduler.step()
-            self.optimizer.zero_grad()
 
         if recoder:
+            self.total_tok_acc += acc_0
+            self.total_phrase_acc += (phrase_start_acc + phrase_end_acc) / 2
             recoder.add_scalar(f'train/Loss', loss.item(), current_step)
             recoder.add_scalar(f'train/pure_token_head_loss', loss_0.item(), current_step)
             recoder.add_scalar(f'train/start_loss', loss_1.item(), current_step)
@@ -90,11 +119,40 @@ class Agent:
             recoder.add_scalar(f'train/token_end_acc', token_end_acc, current_step)
             recoder.add_scalar(f'train/phrase_start_acc', phrase_start_acc, current_step)
             recoder.add_scalar(f'train/phrase_end_acc', phrase_end_acc, current_step)
-        pbar.set_description(f'[!] loss(s|e): {round(loss_1.item(), 4)}|{round(loss_2.item(), 4)}; acc: {round((token_start_acc+token_end_acc)/2, 4)}|{round((phrase_start_acc+phrase_end_acc)/2, 4)}')
+        pbar.set_description(f'[!] loss(s|e): {round(loss_1.item(), 4)}|{round(loss_2.item(), 4)}; acc: {round(acc_0, 4)}|{round((token_start_acc+token_end_acc)/2, 4)}|{round((phrase_start_acc+phrase_end_acc)/2, 4)}')
         pbar.update(1)
+
+    def train_model(self, batch, recoder=None, current_step=0, pbar=None):
+        self.model.train()
+        # self.optimizer.zero_grad()
+        with autocast():
+            batch['current_step'] = current_step
+            loss, result_dict = self.model(batch)
+            loss = loss / self.args['iter_to_accumulate']
+        self.scaler.scale(loss).backward()
+        if (current_step + 1) % self.args['iter_to_accumulate'] == 0:
+            self.scaler.unscale_(self.optimizer)
+            clip_grad_norm_(self.model.parameters(), self.args['grad_clip'])
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+            self.scheduler.step()
+            self.optimizer.zero_grad()
+
+        # if self.args['local_rank'] == 0:
+        #     for k, v in result_dict.items():
+        #         if v != -1:
+        #             self.result[k] += v
+        #             self.result[k + '_cnt'] += 1
+        # if recoder:
+        #     recoder.add_scalar(f'train/Loss', loss.item(), current_step)
+        #     recoder.add_scalar(f'train/token_acc', token_acc, current_step)
+        #     recoder.add_scalar(f'train/phrase_acc', phrase_acc, current_step)
+        # pbar.set_description(f'[!] loss: {round(loss.item(), 4)}; acc(t|p): {round(token_acc, 4)}|{round(phrase_acc, 4)}')
+        # pbar.update(1)
 
     def pretrain_model(self, batch, recoder=None, current_step=0, pbar=None):
         self.model.train()
+        self.optimizer.zero_grad()
         with autocast():
             batch['current_step'] = current_step
             s_loss, e_loss, s_acc, e_acc = self.model(batch)
@@ -107,7 +165,6 @@ class Agent:
             self.scaler.step(self.optimizer)
             self.scaler.update()
             self.scheduler.step()
-            self.optimizer.zero_grad()
 
         if recoder:
             recoder.add_scalar(f'train/Loss', loss.item(), current_step)
@@ -116,6 +173,33 @@ class Agent:
             recoder.add_scalar(f'train/phrase_start_acc', s_acc.item(), current_step)
             recoder.add_scalar(f'train/phrase_end_acc', e_acc.item(), current_step)
         pbar.set_description(f'[!] loss(s|e): {round(s_loss.item(), 4)}|{round(e_loss.item(), 4)}; acc: {round(s_acc.item(), 4)}|{round(e_acc.item(), 4)}')
+        pbar.update(1)
+    
+    def queryside_tuning_model(self, batch, recoder=None, current_step=0, pbar=None):
+        self.model.train()
+        self.optimizer.zero_grad()
+        with autocast():
+            batch['current_step'] = current_step
+            loss_0, loss_1, acc_0, phrase_acc = self.model(batch)
+            loss = loss_0 + loss_1
+            loss = loss / self.args['iter_to_accumulate']
+        self.scaler.scale(loss).backward()
+        if (current_step + 1) % self.args['iter_to_accumulate'] == 0:
+            self.scaler.unscale_(self.optimizer)
+            clip_grad_norm_(self.model.parameters(), self.args['grad_clip'])
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+            self.scheduler.step()
+            
+        if recoder:
+            self.total_tok_acc += acc_0
+            self.total_phrase_acc += phrase_acc
+            recoder.add_scalar(f'train/Loss', loss.item(), current_step)
+            recoder.add_scalar(f'train/token_loss', loss_0.item(), current_step)
+            recoder.add_scalar(f'train/phrase_loss', loss_1.item(), current_step)
+            recoder.add_scalar(f'train/token_acc', acc_0, current_step)
+            recoder.add_scalar(f'train/phrase_acc', phrase_acc, current_step)
+        pbar.set_description(f'[!] loss(t|p): {round(loss_0.item(), 4)}|{round(loss_1.item(), 4)}; acc: {round(acc_0, 4)}|{round(phrase_acc, 4)}')
         pbar.update(1)
 
     def load_latest_checkpoint(self):
@@ -150,70 +234,15 @@ class Agent:
             path
         )
         print(f'[!] save model into {path}')
+        # with open(f'{self.args["log_dir"]}/{self.args["mode"]}/{self.args["version"]}.log', 'a') as fLog:
+        #     fLog.write(f'step: {current_step}, ')
+        #     for k, v in self.result.items():
+        #         if k.endswith('_cnt'):
+        #             continue
+        #         fLog.write(f'{k}: {round(v / self.result[k + "_cnt"], 4)}\n')
 
-    @torch.no_grad()
-    def debug_generate_one_step_fast(self, ids, phrase_reps, phrase_sources, decoding_method='greedy', temp=1., top_k=0, top_p=0.92):
-        self.model.eval()
-        query = self.model.get_query_rep(ids)
-        score = torch.matmul(query, phrase_reps.t()).squeeze(0)   
-
-        if decoding_method == 'greedy':
-            index = score.max(dim=-1)[1].item()
-            candidate = phrase_sources[index]
-        elif decoding_method == 'nucleus_sampling':
-            score = top_k_top_p_filtering(score, top_k=top_k, top_p=top_p)
-            index = torch.multinomial(F.softmax(score/temp, dim=-1), num_samples=1).item()
-            candidate = phrase_sources[index]
-            if type(candidate) == list:
-                candidate_string = self.model.bert_tokenizer.decode(candidate)
-            else:
-                candidate_string = self.model.tokenizer.decode(candidate)
-
-            scores, topk_index = F.softmax(score, dim=-1).topk(self.args['phrase_topk'], dim=-1)
-            candidates = [self.model.bert_tokenizer.decode(phrase_sources[idx]) if type(phrase_sources[idx]) == list else self.model.tokenizer.decode(phrase_sources[idx]) for idx in topk_index]
-            scores = scores.tolist()
-            print(f'[!] current prefix:')
-            print(self.model.tokenizer.decode(ids[0]))
-            ipdb.set_trace()
-        else:
-            pass
-
-        # get textual candidate
-        if type(candidate) == list:
-            candidate = ' ' + self.model.bert_tokenizer.decode(candidate).replace('[UNK]', '<|endoftext|>')
-            sub_ids = self.model.tokenizer.encode(candidate, add_special_tokens=False)
-        else:
-            sub_ids = [candidate]
-        sub_ids = torch.LongTensor(sub_ids).unsqueeze(0).cuda()
-        ids = torch.cat((ids, sub_ids), dim=-1)
-        return ids, candidate
-
-    @torch.no_grad()
-    def debug_generate_one_sample(self, text, retriever, decoding_method='greedy', top_k=0, top_p=0.95, temp=1.0, get_time_cost=False):
-        self.model.eval()
-        ids = self.model.tokenizer(text, return_tensors='pt', add_special_tokens=False)['input_ids'].cuda()
-        prefix_length = len(ids[0])
-        documents = retriever.search([text], self.args['doc_topk'])[0]
-        # add the prefix
-        # documents = [text] + documents
-        phrase_reps, phrase_sources = self.get_phrases_fast(documents)
-        candidates = []
-        encode_time = 0
-        bt = time.time()
-        while len(ids[0]) <= prefix_length + self.args['max_gen_len']:
-            ids, candidate = self.debug_generate_one_step_fast(ids, phrase_reps, phrase_sources, decoding_method=decoding_method, top_k=top_k, top_p=top_p, temp=temp)
-            candidates.append(candidate)
-            # encode the document prefix
-            if len(ids[0]) > 32 and encode_time == 0:
-                prefix_phrase_reps, prefix_phrase_sources = self.get_prefix_phrases_fast([self.model.tokenizer.decode(ids[0])])
-                phrase_reps = torch.cat([phrase_reps, prefix_phrase_reps], dim=0)
-                phrase_sources.extend(prefix_phrase_sources)
-                encode_time += 1
-        inference_time = time.time() - bt
-        if get_time_cost:
-            return self.model.tokenizer.decode(ids[0, prefix_length:]), candidates, inference_time
-        else:
-            return self.model.tokenizer.decode(ids[0, prefix_length:]), candidates, None
+        # for k in self.result.keys():
+        #     self.result[k] = 0
 
     @torch.no_grad()
     def generate_multiple_sample(self, text, retriever, decoding_method='greedy', top_k=0, top_p=0.95, temp=1.0, get_time_cost=False, random_seeds=[], reference=None):
@@ -256,6 +285,7 @@ class Agent:
                 collections[random_seeds[i]]['time_cost'] = inference_time
         return collections
 
+    # baseline generation method
     @torch.no_grad()
     def generate_one_sample(self, text, retriever, decoding_method='greedy', top_k=0, top_p=0.95, temp=1.0, get_time_cost=False):
         self.model.eval()
@@ -309,6 +339,147 @@ class Agent:
         ids = torch.cat((ids, sub_ids), dim=-1)
         return ids, candidate
 
+    # retrieve docs where candidates also exist
+    @torch.no_grad()
+    def generate_from_candidate_docs(self, text, candidate_list, base_data, phrase2doc_map, max_doc_num=1024, decoding_method='greedy', top_k=0, top_p=0.95, temp=1.0, get_time_cost=False):
+        self.model.eval()
+        ids = self.model.tokenizer(text, return_tensors='pt', add_special_tokens=False)['input_ids'].cuda()
+        prefix_length = len(ids[0])
+        # documents = retriever.search([text], self.args['doc_topk'])[0]
+        doc_per_tok = 50
+        candidate_doc_idx = set()
+        for phrase in candidate_list:
+            if phrase in phrase2doc_map:
+                new_candidates = phrase2doc_map[phrase].keys()
+                if len(new_candidates) > doc_per_tok:
+                    candidate_doc_idx |= set(random.sample(new_candidates, doc_per_tok))
+                else:
+                    candidate_doc_idx |= set(new_candidates)
+        print(f'get {len(candidate_doc_idx)} candidate docs.')
+        if len(candidate_doc_idx) > max_doc_num:
+            candidate_doc_idx = set(random.sample(candidate_doc_idx, max_doc_num))
+        candidate_docs = [base_data[x] for x in candidate_doc_idx]
+        # add the prefix
+        # documents = [text] + documents
+        phrase_reps, phrase_sources = self.get_phrases_fast(candidate_docs)
+        candidates = []
+        encode_time = 0
+        bt = time.time()
+        while len(ids[0]) <= prefix_length + self.args['max_gen_len']:
+            ids, candidate = self.generate_one_step_fast(ids, phrase_reps, phrase_sources, decoding_method=decoding_method, top_k=top_k, top_p=top_p, temp=temp)
+            candidates.append(candidate)
+            if len(candidate_doc_idx) < max_doc_num:
+                if candidate in phrase2doc_map:
+                    new_candidate_doc_idx = phrase2doc_map[phrase].keys()
+                    todo = set()
+                    for x in new_candidate_doc_idx:
+                        if x not in candidate_doc_idx:
+                            todo.add(x)
+                    new_candidate_doc_idx = todo
+                    if len(new_candidate_doc_idx) > doc_per_tok:
+                        new_candidate_doc_idx = random.sample(new_candidate_doc_idx, doc_per_tok)
+                    if len(candidate_doc_idx) + len(new_candidate_doc_idx) > max_doc_num:
+                        new_candidate_doc_idx = random.sample(new_candidate_doc_idx, max_doc_num - len(candidate_doc_idx))
+                    print(f'add {len(new_candidate_doc_idx)} candidate docs.')
+                    new_phrase_reps, new_phrase_sources = self.get_phrases_fast([base_data[x] for x in new_candidate_doc_idx])
+                    phrase_reps = torch.vstack(phrase_reps, new_phrase_reps)
+                    phrase_sources.extend(new_phrase_sources)
+            # encode the document prefix
+            if len(ids[0]) > 32 and encode_time == 0:
+                prefix_phrase_reps, prefix_phrase_sources = self.get_prefix_phrases_fast([self.model.tokenizer.decode(ids[0])])
+                phrase_reps = torch.cat([phrase_reps, prefix_phrase_reps], dim=0)
+                phrase_sources.extend(prefix_phrase_sources)
+                encode_time += 1
+        inference_time = time.time() - bt
+        if get_time_cost:
+            return self.model.tokenizer.decode(ids[0, prefix_length:]), candidates, inference_time
+        else:
+            return self.model.tokenizer.decode(ids[0, prefix_length:]), candidates, None
+
+    # generate based on gt docs
+    @torch.no_grad()
+    def generate_test(self, text, candidate_docs, decoding_method='greedy', top_k=0, top_p=0.95, temp=1.0, get_time_cost=False):
+        self.model.eval()
+        ids = self.model.tokenizer(text, return_tensors='pt', add_special_tokens=False)['input_ids'].cuda()
+        prefix_length = len(ids[0])
+        if type(candidate_docs[0]) == str: # docs
+            phrase_reps, phrase_sources = self.get_phrases_fast(candidate_docs)
+        else: # list of phrases
+            phrase_reps, phrase_sources = self.get_phrases_test_fast(candidate_doc_phrases)
+        candidates = []
+        bt = time.time()
+        while len(ids[0]) <= prefix_length + self.args['max_gen_len']:
+            ids, candidate = self.generate_one_step_fast(ids, phrase_reps, phrase_sources, decoding_method=decoding_method, top_k=top_k, top_p=top_p, temp=temp)
+            candidates.append(candidate)
+
+        inference_time = time.time() - bt
+        if get_time_cost:
+            return self.model.tokenizer.decode(ids[0, prefix_length:]), candidates, inference_time
+        else:
+            return self.model.tokenizer.decode(ids[0, prefix_length:]), candidates, None
+
+    @torch.no_grad()
+    def get_phrases_test_fast(self, phrases_list):
+        self.model.eval()
+        documents = [' '.join(x) for x in phrases_list]
+        # feed the 1024 maybe to big, leading to OOM
+        inner_batch_size = 256
+        offset_mapping, begin_hidden_states, end_hidden_states, vl, doc_ids = [], [], [], [], []
+        for idx in range(0, len(documents), inner_batch_size):
+            s_index, e_index = idx, idx + inner_batch_size
+            batch_doc = documents[s_index:e_index]
+            batch = self.model.bert_tokenizer.batch_encode_plus(batch_doc, padding=True, return_tensors='pt', max_length=256, truncation=True, return_offsets_mapping=True)
+            input_ids = batch['input_ids'].cuda()
+            mask = batch['attention_mask'].cuda()
+            offset_mapping.extend(batch['offset_mapping'])
+            hs = self.model.phrase_encoder(input_ids, mask, output_hidden_states=True)['hidden_states'][-1]    # [B, S, E]
+            bhs = self.model.s_proj(hs)
+            ehs = self.model.e_proj(hs)
+            begin_hidden_states.extend(bhs)
+            end_hidden_states.extend(ehs)
+            vl.extend(mask.sum(dim=-1))
+            doc_ids.extend(input_ids.tolist())
+        assert len(end_hidden_states) == len(begin_hidden_states) == len(documents) == len(vl) == len(doc_ids)
+
+        begin_rep, end_rep = [], []
+        phrase_sources = []
+        # remove duplication in the phrase tables
+        for phrases, doc, begin_doc_rep, end_doc_rep, l, doc_id, offset in zip(phrases_list, documents, begin_hidden_states, end_hidden_states, vl, doc_ids, offset_mapping):
+            s_pos, e_pos = [], []
+            st_pos = [x[0] for x in offset[1: l-1]]
+            end_pos = [x[1] for x in offset[1: l-1]]
+            cur_pos = 0
+            for phrase in phrases:
+                cur_pos = doc.find(phrase, cur_pos)
+                try:
+                    st_idx = st_pos.index(cur_pos) + 1
+                    end_idx = end_pos.index(cur_pos + len(phrase)) + 1
+                    s_pos.append(st_idx)
+                    e_pos.append(end_idx)
+                    phrase_sources.append(doc_id[st_idx: end_idx + 1])
+                except:
+                    pass
+                cur_pos += len(phrase)
+            s_rep = begin_doc_rep[s_pos, :]
+            e_rep = end_doc_rep[e_pos, :]
+            begin_rep.append(s_rep)
+            end_rep.append(e_rep)
+        if not begin_rep:
+            phrase_reps = self.model.token_embeddings
+            phrase_sources = [idx for idx in range(len(self.model.tokenizer))]
+        else:
+            begin_rep = torch.cat(begin_rep)
+            end_rep = torch.cat(end_rep)
+            phrase_reps = torch.cat([begin_rep, end_rep], dim=-1)
+            phrase_reps = torch.cat([
+                phrase_reps,
+                self.model.token_embeddings
+            ], dim=0)
+            phrase_sources.extend([idx for idx in range(len(self.model.tokenizer))])
+        return phrase_reps, phrase_sources
+    
+
+    # for phrase retrieval
     @torch.no_grad()
     def retrieve_one_phrase(self, text, retriever, phrase_sources, decoding_method='greedy', top_k=0, top_p=0.95, temp=1.0, get_time_cost=False):
         self.model.eval()
@@ -326,44 +497,72 @@ class Agent:
             return self.model.tokenizer.decode(ids[0, prefix_length:]), candidates, None
 
     @torch.no_grad()
-    def retrieve_one_step_fast(self, ids, retriever, phrase_sources, decoding_method='greedy', temp=1., top_k=0, top_p=0.92):
+    def retrieve_one_step_fast(self, ids, retriever, phrase_sources, end_token='<|endoftext|>', decoding_method='greedy', temp=1., top_k=0, top_p=0.92):
         self.model.eval()
-        query = self.model.get_query_rep(ids).cpu().numpy()
+        query = self.model.get_query_rep(ids)#.cpu() #.numpy()
+        topk_phrase = 128
+        D, I, R = retriever.search_and_reconstruct(query.cpu(), topk_phrase)
+        # candidate_reps = self.model.token_embeddings
+        candidate_reps = torch.vstack((self.model.token_embeddings, R[0].cuda()))
+        logits = torch.matmul(query, candidate_reps.t())[0]
+        candidate = None
         if decoding_method == 'greedy':
-            D, I = retriever.search(query, 1)
-            index = I[0][0]
-            candidate = phrase_sources[index]
+            index = torch.argmax(logits, dim=-1).item()
         elif decoding_method == 'nucleus_sampling':
-            score = top_k_top_p_filtering(score, top_k=top_k, top_p=top_p)
+            score = top_k_top_p_filtering(logits, top_k=top_k, top_p=top_p)
             index = torch.multinomial(F.softmax(score/temp, dim=-1), num_samples=1).item()
-            candidate = phrase_sources[index]
+        elif decoding_method == 'nucleus_sampling_balance':
+            tok_num = topk_phrase
+            tok_indices = torch.argsort(logits[:self.model.vocab_size], dim=-1, descending=True)[:tok_num]
+            logits = torch.hstack((logits[tok_indices], logits[self.model.vocab_size:]))
+            print(logits[:tok_num])
+            print(logits[tok_num:])
+            exit()
+            score = top_k_top_p_filtering(logits, top_k=top_k, top_p=top_p)
+            index = torch.multinomial(F.softmax(score/temp, dim=-1), num_samples=1).item()
+            if index < tok_num:
+                candidate = tok_indices[index].item()
+            else:
+                candidate = phrase_sources[I[0][index - self.model.vocab_size]]
+        elif decoding_method == 'nucleus_sampling_phrase':
+            score = top_k_top_p_filtering(logits[self.model.vocab_size:], top_k=top_k, top_p=top_p)
+            index = torch.multinomial(F.softmax(score/temp, dim=-1), num_samples=1).item()
+            candidate = phrase_sources[I[0][index]]
         else:
-            pass
+            raise NotImplementedError
+
+        if candidate is None:
+            if index < self.model.vocab_size:
+                candidate = index
+            else:
+                candidate = phrase_sources[I[0][index - self.model.vocab_size]]
 
         # get textual candidate
-        if type(candidate) == list:
-            candidate = ' ' + self.model.bert_tokenizer.decode(candidate).replace('[UNK]', '<|endoftext|>')
-            sub_ids = self.model.tokenizer.encode(candidate, add_special_tokens=False)
-        elif type(candidate) == str:
+        if type(candidate) == int: # tok
+            # candidate = ' ' + self.model.bert_tokenizer.decode(candidate).replace('[UNK]', '<|endoftext|>')
+            # sub_ids = self.model.tokenizer.encode(candidate, add_special_tokens=False)
+            sub_ids = [candidate]
+            candidate = self.model.tokenizer.convert_ids_to_tokens(candidate).replace('[UNK]', '<|endoftext|>')
+        elif type(candidate) == str: # phrase
             candidate = ' ' + candidate
             sub_ids = self.model.tokenizer.encode(candidate, add_special_tokens=False)
         else:
-            sub_ids = [candidate]
+            raise NotImplementedError
         sub_ids = torch.LongTensor(sub_ids).unsqueeze(0).cuda()
         ids = torch.cat((ids, sub_ids), dim=-1)
         return ids, candidate
 
     @torch.no_grad()
-    def get_phrases_fast(self, documents):
+    def get_phrases_fast(self, documents, add_token=True):
         self.model.eval()
 
-        # feed the 1024 maybe to big, leading to OOM
+        # feed the 1024 maybe too big, leading to OOM
         inner_batch_size = 256
         begin_hidden_states, end_hidden_states, vl, doc_ids = [], [], [], []
         for idx in range(0, len(documents), inner_batch_size):
             s_index, e_index = idx, idx + inner_batch_size
-            batch_doc = documents[s_index:e_index]
-            batch = self.model.bert_tokenizer.batch_encode_plus(batch_doc, padding=True, return_tensors='pt', max_length=200, truncation=True)
+            batch_doc = documents[s_index: e_index]
+            batch = self.model.bert_tokenizer.batch_encode_plus(batch_doc, padding=True, return_tensors='pt', max_length=512, truncation=True)
             input_ids = batch['input_ids'].cuda()
             mask = batch['attention_mask'].cuda()
             hs = self.model.phrase_encoder(input_ids, mask, output_hidden_states=True)['hidden_states'][-1]    # [B, S, E]
@@ -374,19 +573,18 @@ class Agent:
             vl.extend(mask.sum(dim=-1))
             doc_ids.extend(input_ids.tolist())
         assert len(end_hidden_states) == len(begin_hidden_states) == len(documents) == len(vl) == len(doc_ids)
-
         begin_rep, end_rep = [], []
         phrase_sources = []
         phrase_sources_set = set()
         # remove duplication in the phrase tables
-        for begin_doc_rep, end_doc_rep, l, doc_id in zip(begin_hidden_states, end_hidden_states, vl, doc_ids):
+        for idx, (begin_doc_rep, end_doc_rep, l, doc_id) in enumerate(zip(begin_hidden_states, end_hidden_states, vl, doc_ids)):
             s_pos, e_pos = [], []
             # ignore the [CLS] token
             for i in range(1, l-self.args['left_window_size']-1):
                 # ignore the [SEP] token
                 for j in range(
-                    min(i+self.args['left_window_size'], l-2), 
-                    min(i+self.args['right_window_size'], l-2)
+                    min(i + self.args['left_window_size'], l-1), 
+                    min(i + self.args['right_window_size'], l-1)
                 ):
                     phrase = doc_id[i:j+1]
                     if tuple(phrase) not in phrase_sources_set:
@@ -401,11 +599,12 @@ class Agent:
         begin_rep = torch.cat(begin_rep)
         end_rep = torch.cat(end_rep)
         phrase_reps = torch.cat([begin_rep, end_rep], dim=-1)
-        phrase_reps = torch.cat([
-            phrase_reps,
-            self.model.token_embeddings
-        ], dim=0)
-        phrase_sources.extend([idx for idx in range(len(self.model.tokenizer))])
+        if add_token:
+            phrase_reps = torch.cat([
+                phrase_reps,
+                self.model.token_embeddings
+            ], dim=0)
+            phrase_sources.extend([idx for idx in range(len(self.model.tokenizer))])
         return phrase_reps, phrase_sources
     
     @torch.no_grad()
@@ -416,7 +615,8 @@ class Agent:
         mask = batch['attention_mask'].cuda()
 
         # replace the [CLS] with [PREFIX] for the prefix text (document)
-        input_ids[0, 0] = self.model.prefix_token_id
+        if hasattr(self.model, 'prefix_token_id'):
+            input_ids[0, 0] = self.model.prefix_token_id
 
         vl = mask.sum(dim=-1)
         hidden_states = self.model.phrase_encoder(input_ids, mask, output_hidden_states=True)['hidden_states'][-1]    # [B, S, E]
@@ -445,6 +645,7 @@ class Agent:
 
     def train_model_gpt2(self, batch, recoder=None, current_step=0, pbar=None):
         self.model.train()
+        self.optimizer.zero_grad()
         with autocast():
             batch['current_step'] = current_step
             loss, acc = self.model(batch)
@@ -454,13 +655,15 @@ class Agent:
         self.scaler.step(self.optimizer)
         self.scaler.update()
         self.scheduler.step()
-        self.optimizer.zero_grad()
 
-        if recoder:
-            recoder.add_scalar(f'train/RunLoss', loss.item(), current_step)
-            recoder.add_scalar(f'train/Tokenacc', acc, current_step)
-        pbar.set_description(f'[!] loss: {round(loss.item(), 4)}; acc: {round(acc, 4)}')
-        pbar.update(1)
+        if self.args['global_rank'] == 0:
+            self.result['acc'] += acc
+            self.result['step'] += 1
+            if current_step % self.args['save_every'] == 0:
+                with open(f'{self.args["log_dir"]}/{self.args["mode"]}/{self.args["version"]}.log', 'a') as fLog:
+                    fLog.write(f'step: {current_step}, acc: {round(self.result["acc"] / self.result["step"] * 100, 2)}\n')
+                    self.result['acc'] = 0
+                    self.result['step'] = 0
 
     @torch.no_grad()
     def gpt2_generation(self, prefix, decoding_method='nucleus_sampling', top_k=0, top_p=0.95, temp=1.0, get_time_cost=False):
@@ -549,34 +752,58 @@ class Agent:
         print('Perplexity:', round(ppl, 4))
 
     @torch.no_grad()
-    def get_phrase_emb(self, phrase_lists, label_lists):
-        texts = [' '.join(phrases) for phrases in phrase_lists]
+    def get_phrase_emb(self, phrase_lists, doc_labels, docs_map):
+        docs_text = [docs_map[x] for x in doc_labels]
         self.model.eval()
-        all_s_rep, all_e_rep, all_offsets = self.model.encode_batch(texts)
+        all_s_rep, all_e_rep, all_offsets = self.model.encode_doc_batch(docs_text)
         all_phrase_emb = []
         all_phrase = []
-        for phrases, labels, s_rep, e_rep, offset in zip(phrase_lists, label_lists, all_s_rep, all_e_rep, all_offsets):
-            cur_pos = 0
+        all_phrase_pos = []
+        for phrases, doc_idx, doc, s_rep, e_rep, offset in zip(phrase_lists, doc_labels, docs_text, all_s_rep, all_e_rep, all_offsets):
             st_pos = [pos[0] for pos in offset[1:]]
             end_pos = [pos[1] for pos in offset[1:]]
-            for phrase, label in zip(phrases, labels):
-                if not label:
-                    cur_pos += len(phrase) + 1
-                    continue
+            phrase_st_idx = []
+            phrase_end_idx = []
+            for phrase, phrase_st_pos in phrases:
+                phrase_end_pos = phrase_st_pos + len(phrase)
                 try:
-                    phrase_st_idx = st_pos.index(cur_pos) + 1
-                    phrase_end_idx = end_pos.index(cur_pos + len(phrase)) + 1
+                    st_idx_ = st_pos.index(phrase_st_pos) + 1
+                    end_idx_ = end_pos.index(phrase_end_pos) + 1
                 except:
-                    print(phrases)
-                    print(f'[{phrase}], {cur_pos}')
-                    cur_pos += len(phrase) + 1
                     continue
-                cur_pos += len(phrase) + 1
-                phrase_emb = torch.hstack((s_rep[phrase_st_idx], e_rep[phrase_end_idx])).cpu()
-                all_phrase_emb.append(phrase_emb)
+                phrase_st_idx.append(st_idx_)
+                phrase_end_idx.append(end_idx_)
                 all_phrase.append(phrase)
-        return all_phrase, all_phrase_emb
-        
+                all_phrase_pos.append((doc_idx, phrase_st_pos, phrase_end_pos))
+
+            phrase_emb = torch.hstack((s_rep[torch.LongTensor(phrase_st_idx)], e_rep[torch.LongTensor(phrase_end_idx)]))
+            if self.model.dim_proj is not None:
+                phrase_emb = self.model.dim_proj(phrase_emb)
+            all_phrase_emb.append(phrase_emb.cpu())
+
+        return all_phrase, all_phrase_emb, all_phrase_pos
+    
+    # for QA test
+    @torch.no_grad()
+    def test_MRCQA(self, story, questions, answers):
+        self.model.eval()
+        questions_batch = self.model.tokenizer.batch_encode_plus(questions, padding=False, max_length=1024, truncation=True)
+        ids = questions_batch['input_ids']
+        tail_idx = [len(x) - 1 for x in ids]
+        gpt2_ids = pad_sequence([torch.LongTensor(i) for i in ids], padding_value=self.model.tokenizer.eos_token_id, batch_first=True).cuda()
+        gpt2_mask = generate_mask(gpt2_ids, pad_token_idx=self.model.tokenizer.eos_token_id).cuda()
+
+        questions_reps_ = \
+        self.model.model(input_ids=gpt2_ids, attention_mask=gpt2_mask, output_hidden_states=True).hidden_states[-1]
+        questions_reps = questions_reps_[range(len(questions)), tail_idx]
+
+        phrase_reps, phrase_sources = self.get_phrases_fast([story], add_token=False)
+        score = torch.matmul(questions_reps, phrase_reps.t())
+        preds = torch.argmax(score, dim=-1).view(-1).cpu().tolist()
+        preds = [phrase_sources[x] for x in preds]
+        preds = [self.model.bert_tokenizer.decode(x) for x in preds]
+        return preds
+
 
 def top_k_top_p_filtering(logits, top_k=0, top_p=0.0, threshold=-float('Inf'), filter_value=-np.inf):
     assert logits.dim() == 1

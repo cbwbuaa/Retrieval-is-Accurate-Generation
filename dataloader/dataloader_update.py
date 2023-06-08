@@ -11,7 +11,7 @@ class CopyisallyouneedWikitext103V2Dataset(Dataset):
         self.prefix_token_id = self.bert_vocab.convert_tokens_to_ids('[PREFIX]')
         self.vocab = AutoTokenizer.from_pretrained(args['prefix_encoder_tokenizer'][args['lang']])
         self.data_root_path = args['data_root_dir']
-        self.file_lists = [f'/apdcephfs/share_916081/ponybwcao/phrase_extraction/retrieve_doc/output/wikitext103/copyisallyouneed/ref_data/8split_0neg/tokenization_result_{i}.jsonl' for i in range(args['data_file_num'])]
+        self.file_lists = [f'/apdcephfs/share_916081/shared_info/ponybwcao/Copyisallyouneed/data/wikitext103_1024/baseline_data/dpr_search_result_128_{i}.txt' for i in range(4)]
 
         # count the number of the samples
         self.size = 0
@@ -126,7 +126,7 @@ class CopyisallyouneedWikitext103V2Dataset(Dataset):
                     cache_phrase.append((phrase, 0))
 
                 if counter >= self.args['max_doc_size']:
-                    self.last_delta = delta
+                    self.last_delta += delta
                     self.if_last_over = False
                     break
                 delta += 1

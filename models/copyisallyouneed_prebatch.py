@@ -40,7 +40,7 @@ class CopyisallyouneedNegPrebatch(nn.Module):
 
         ''' 0428 YQC edit: start'''
         self.pre_batch_phrases = []
-        self.pre_batch_queue_size = args["prebatch_phrase_num"]
+        self.pre_batch_queue_size = args["prebatch_phrase_num"] if 'prebatch_phrase_num' in args else 0
         ''' 0428 YQC edit: end'''
 
     @torch.no_grad()
@@ -56,11 +56,12 @@ class CopyisallyouneedNegPrebatch(nn.Module):
             text = cur_phrase_text[idx]
             if len(self.pre_batch_phrases) >= self.pre_batch_queue_size:
                 self.pre_batch_phrases.pop(0)
-            self.pre_batch_phrases.append((emb, text))
+            self.pre_batch_phrases.append((emb.detach(), text))
     ''' 0428 YQC edit: end'''
 
     def _get_prebatch_phrase_emb(self, cur_phrase_text):
-        embs = [emb.detach() for emb, text in self.pre_batch_phrases if text not in cur_phrase_text]
+        tmp_dict = {x: 1 for x in cur_phrase_text}
+        embs = [emb for emb, text in self.pre_batch_phrases if text not in tmp_dict]
         return torch.vstack(embs) if embs else None
 
     def get_token_loss(self, ids, hs, ids_mask):
@@ -126,18 +127,19 @@ class CopyisallyouneedNegPrebatch(nn.Module):
         doc_phrase_end_idx = self.vocab_size + attention_mask.shape[-1]
         padding_mask[:, doc_phrase_st_idx: doc_phrase_end_idx] = attention_mask
 
-        # build the position mask: 1 for valid and 0 for mask
-        pos_mask = batch['pos_mask']
         start_labels, end_labels = batch['start_labels'][:, 1:].reshape(-1), batch['end_labels'][:, 1:].reshape(-1)
-        position_mask = torch.ones_like(logits).to(torch.long)
-        query_pos = start_labels > self.vocab_size
-        # 去掉query中padding的位置
-        position_mask[query_pos, doc_phrase_st_idx: doc_phrase_end_idx] = pos_mask
-        assert padding_mask.shape == position_mask.shape
-        # overall mask
-        overall_mask = padding_mask * position_mask
-        ## remove the position mask
-        # overall_mask = padding_mask
+        if not self.args['in_batch']:
+            # build the position mask: 1 for valid and 0 for mask
+            pos_mask = batch['pos_mask']
+            position_mask = torch.ones_like(logits).to(torch.long)
+            query_pos = start_labels > self.vocab_size
+            position_mask[query_pos, doc_phrase_st_idx: doc_phrase_end_idx] = pos_mask
+            assert padding_mask.shape == position_mask.shape
+            # overall mask
+            overall_mask = padding_mask * position_mask
+        else:
+            ## remove the position mask
+            overall_mask = padding_mask
 
         new_logits = torch.where(overall_mask.to(torch.bool), logits, torch.tensor(-1e4).to(torch.half).cuda())
         mask = torch.zeros_like(new_logits)
@@ -219,8 +221,8 @@ class CopyisallyouneedNegPrebatch(nn.Module):
 
         return (
             loss_0,  # token loss
-            loss_1,  # token-head loss
-            loss_2,  # token-tail loss
+            loss_1,  # phrase-head loss
+            loss_2,  # phrase-tail loss
             acc_0,  # token accuracy
             phrase_start_acc,
             phrase_end_acc,
@@ -228,7 +230,8 @@ class CopyisallyouneedNegPrebatch(nn.Module):
             token_end_acc
         )
 
-    def encode_batch(self, sentences, batch_size=256, device='cuda'):
+    @torch.no_grad()
+    def encode_batch(self, sentences, batch_size=512, device='cuda'):
         all_s_rep = []
         all_e_rep = []
         all_offsets = []
