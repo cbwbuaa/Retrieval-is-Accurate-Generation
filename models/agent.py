@@ -51,7 +51,7 @@ class Agent:
             num_warmup_steps=self.args['warmup_step'], 
             num_training_steps=self.args['total_step'],
         )
-        find_unused_parameters = True if self.args['mode'] != 'queryside' else False
+        find_unused_parameters = False #True if self.args['mode'] != 'queryside' else False
         self.model = nn.parallel.DistributedDataParallel(
             self.model, 
             device_ids=[self.args['local_rank']], 
@@ -135,8 +135,8 @@ class Agent:
             clip_grad_norm_(self.model.parameters(), self.args['grad_clip'])
             self.scaler.step(self.optimizer)
             self.scaler.update()
-            self.scheduler.step()
             self.optimizer.zero_grad()
+            self.scheduler.step()
 
         # if self.args['local_rank'] == 0:
         #     for k, v in result_dict.items():

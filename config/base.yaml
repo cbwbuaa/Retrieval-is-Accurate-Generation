@@ -9,7 +9,8 @@ models:
     copyisallyouneed: 
         model_name: 
             pretrain: CopyisallyouneedPretrain
-            train: CopyisallyouneedAllRefV2
+            train: CopyisallyouneedPrefixOnly
+            # train: CopyisallyouneedAllRefV2
             train_asyn: CopyisallyouneedAllRefV2Asyn
             train_pipeline: CopyisallyouneedAllRefV2Pipeline
             # train: CopyisallyouneedNegPrebatch
@@ -30,6 +31,7 @@ models:
                 # train_neg: CopyisallyouneedWikitext103V2DatasetNeg
             wikipedia:
                 train_pipeline: CopyisallyouneedWikipediaDataset
+                train: CopyisallyouneedPrefixOnly
     gpt2:
         model_name: 
             train: GPT2Baseline

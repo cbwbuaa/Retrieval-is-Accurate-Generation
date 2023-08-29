@@ -8,6 +8,7 @@ from .dataloader_prebatch_all_ref_all_candidate import *
 from .dataloader_prebatch_all_ref_all_candidate_v2 import *
 from .dataloader_prebatch_all_ref_all_candidate_v2_asyn import *
 from .dataloader_prebatch_all_ref_all_candidate_v2_asyn_wikipedia import *
+from .dataloader_prefix_only import *
 from .gpt2_dataloader import *
 from .knnlm_dataloader import *
 
@@ -21,7 +22,7 @@ def load_dataset(args):
     else:
         sampler = torch.utils.data.distributed.DistributedSampler(data)
 
-    iter_ = DataLoader(data, batch_size=args['batch_size'], collate_fn=data.collate, sampler=sampler)
+    iter_ = DataLoader(data, batch_size=1, collate_fn=data.collate, sampler=sampler)
 
     return data, iter_, sampler
 

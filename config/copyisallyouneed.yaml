@@ -1,15 +1,15 @@
 phrase_encoder_tokenizer: 
     zh: 123
-    en: /apdcephfs/share_916081/shared_info/ponybwcao/PLM/bert-base-cased
+    en: /apdcephfs/share_916081/ponybwcao/PLM/bert-base-cased
 phrase_encoder_model: 
     zh: 123
-    en: /apdcephfs/share_916081/shared_info/ponybwcao/PLM/bert-base-cased
+    en: /apdcephfs/share_916081/ponybwcao/PLM/bert-base-cased
 prefix_encoder_tokenizer: 
     zh: 123
-    en: /apdcephfs/share_916081/shared_info/ponybwcao/PLM/GPT2-small
+    en: /apdcephfs/share_916081/ponybwcao/PLM/GPT2-small
 prefix_encoder_model: 
     zh: 123
-    en: /apdcephfs/share_916081/shared_info/ponybwcao/PLM/GPT2-small
+    en: /apdcephfs/share_916081/ponybwcao/PLM/GPT2-small
 
 # pretrain configuration
 pretrain:
@@ -36,13 +36,13 @@ train:
     # lr: 5e-4 # 5e-5
     grad_clip: 1.0
     seed: 0
-    batch_size: 1
-    max_len: 256
-    max_doc_size: 32
-    buffer_size: 81920
-    total_step: 1000001
-    save_every: 10000
-    doc_max_length: 512
+    batch_size: 4
+    max_len: 1024
+    # max_doc_size: 32
+    buffer_size: 50
+    # total_step: 100001
+    # save_every: 10000
+    # doc_max_length: 512
 
 # Asynchronous training configuration
 train_asyn:
