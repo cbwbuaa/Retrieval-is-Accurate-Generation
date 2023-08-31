@@ -1,5 +1,6 @@
 from header import *
-import spacy, random, collections
+# import spacy
+import random, collections
 from .util_func import *
 from time import time
 class Agent:
@@ -28,10 +29,10 @@ class Agent:
                 self.load_trained_model(args["trained_model_path"])
         self.result = collections.defaultdict(int)
 
-    def evaluate_model(self, current_step):
+    def evaluate_model(self, current_step, quiet=True):
         self.model.eval()
         print('[!] evaluating step', current_step)
-        all_result, tok_counter, phrase_counter = self.model.module.evaluate(quiet=True)
+        all_result, tok_counter, phrase_counter = self.model.module.evaluate(quiet=quiet)
         with open(f'{self.args["log_dir"]}/{self.args["mode"]}/{self.args["version"]}.log', 'a') as fLog:
             fLog.write(f'step: {current_step}\n')
             for k, v in all_result.items():
@@ -128,6 +129,7 @@ class Agent:
         with autocast():
             batch['current_step'] = current_step
             loss, result_dict = self.model(batch)
+            # print(loss)
             loss = loss / self.args['iter_to_accumulate']
         self.scaler.scale(loss).backward()
         if (current_step + 1) % self.args['iter_to_accumulate'] == 0:

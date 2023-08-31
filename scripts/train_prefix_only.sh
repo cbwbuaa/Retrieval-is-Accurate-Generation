@@ -23,19 +23,17 @@ model=copyisallyouneed
 cuda=$1
 # ========== metadata ========== #
 
-prebatch_step=0
 temp=2.0
 beta=0.5
 loss_type=focal_loss
 warmup_step=10000
 lr=1e-4
-prebatch_num=0
 phrase_dim=128
 
 version=0829_test
 
 # pretrain_model_path=/apdcephfs/share_916081/shared_info/ponybwcao/Copyisallyouneed/ckpt/wikitext103/copyisallyouneed/train_pipeline/best_0601_shuffle_queue5k_mergedQ_eval1k_dim128_focal_loss_lr1e-4_prebatch0_beta0.5_warmup50000_prenum0_temp2.0_400000.pt
-training_data_dir=/apdcephfs/share_916081/ponybwcao/phrase_extraction/data/minipile/match_result
+training_data_dir=/apdcephfs/share_916081/ponybwcao/phrase_extraction/data/minipile/match_result_tok
 
 root_dir=/apdcephfs/share_916081/ponybwcao/tmp/copyisallyouneed_v2
 # backup
@@ -51,21 +49,18 @@ recoder_file=$root_dir/rest/$dataset/$model/recoder_train_$version.txt
 
 gpu_ids=(${cuda//,/ })
 CUDA_VISIBLE_DEVICES=$cuda python3.8 -m torch.distributed.launch --nproc_per_node=${#gpu_ids[@]} --master_addr 127.0.0.1 --master_port 28445 train_prefix_only.py \
-    --total_step 100000 \
-    --save_every 10000 \
+    --total_step 1000 \
+    --save_every 100 \
     --dataset $dataset \
     --model $model \
     --multi_gpu $cuda \
     --total_workers ${#gpu_ids[@]} \
-    --data_file_num 8 \
     --version $version \
     --training_data_dir $training_data_dir \
     --mode train \
-    --prebatch_step ${prebatch_step} \
     --temp ${temp} \
     --loss_type $loss_type \
     --beta $beta \
-    --prebatch_num $prebatch_num \
     --warmup_step $warmup_step \
     --lr $lr \
     --phrase_dim $phrase_dim

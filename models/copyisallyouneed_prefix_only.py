@@ -7,7 +7,7 @@ import collections
 from .util_func import *
 import faiss
 import faiss.contrib.torch_utils
-
+from copy import deepcopy
 # torch.set_printoptions(profile='full')
 
 class CopyisallyouneedPrefixOnly(nn.Module):
@@ -48,6 +48,7 @@ class CopyisallyouneedPrefixOnly(nn.Module):
         return output
 
     def get_token_loss(self, ids, hs, AR_mask, token_reps, do_eval=True):
+        AR_mask = AR_mask.to(torch.bool)
         label = ids[:, 1:].reshape(-1)
         label_mask = AR_mask[:, 1:].reshape(-1)
         label = label[label_mask]
@@ -57,14 +58,16 @@ class CopyisallyouneedPrefixOnly(nn.Module):
         )
         logits = logits.reshape(-1, logits.shape[-1])
         logits = logits[label_mask]
-
         # logits /= self.args['temp']
         loss = self.gen_loss_fct(logits, label)
         if not do_eval:
             return loss
         else:
             chosen_tokens = torch.max(logits, dim=-1)[1]
-            gen_acc = (chosen_tokens.reshape(-1) == label.reshape(-1)).to(torch.long)
+            # print(self.tokenizer.decode(chosen_tokens[:100]))
+            # print('-'*20)
+            # print(self.tokenizer.decode(label[:100]))
+            gen_acc = (chosen_tokens == label).to(torch.long)
             gen_acc = gen_acc.sum().item() / len(gen_acc)
             return loss, gen_acc
 
@@ -75,14 +78,13 @@ class CopyisallyouneedPrefixOnly(nn.Module):
             token_reps = self.dim_proj(token_reps)
         
         ## gpt2 query encoder
-        ids, ids_mask = batch['gpt2_ids'].cuda(), batch['gpt2_mask'].cuda()
+        ids, ids_mask, AR_mask = batch['gpt2_ids'].cuda(), batch['gpt2_mask'].cuda(), batch['AR_mask'].to(torch.bool).cuda()
         query_hidden_states = \
         self.model(input_ids=ids, attention_mask=ids_mask, output_hidden_states=True).hidden_states[-1]
         if self.dim_proj is not None:
             query_hidden_states = self.dim_proj(query_hidden_states)
-        
-        AR_mask = batch['AR_mask'].to(torch.bool).cuda()
-        AR_loss = self.get_token_loss(ids, query_hidden_states, AR_mask, token_reps, do_eval=False)
+        AR_loss, acc = self.get_token_loss(ids, query_hidden_states, AR_mask, token_reps, do_eval=True)
+        # print('AR_loss_acc:', AR_loss, acc)
 
         phrase_rep = batch['phrase_embedding']
         if phrase_rep is None:
@@ -96,13 +98,14 @@ class CopyisallyouneedPrefixOnly(nn.Module):
         false_neg_mask = batch['false_neg_mask'].cuda()
         false_neg_mask = false_neg_mask.reshape(-1, false_neg_mask.shape[-1])
         labels = batch['phrase_label'].cuda()
-
+        
         query = query_hidden_states[:, :-1].reshape(-1, query_hidden_states.shape[-1])
         query_mask = AR_mask[:, 1:].reshape(-1).to(torch.bool)
         query = query[query_mask]
         labels = labels[:, :-1].reshape(-1)
         labels = labels[query_mask]
         phrase_indexes = labels >= self.vocab_size
+        # print('query:', query.shape, labels.shape, phrase_indexes.sum().item())
         # token_indexes = ~phrase_indexes
         # phrase_num = phrase_indexes.sum()
         # token_num = token_indexes.sum()
@@ -148,6 +151,7 @@ class CopyisallyouneedPrefixOnly(nn.Module):
             loss = F.log_softmax(logits, dim=-1)
             loss = loss[range(len(logits)), labels]
             loss = (-loss.sum(dim=-1)).mean()
+        loss += AR_loss
         if torch.isnan(loss).any():
             sys.stderr.write(f"loss nan\n")
             sys.stderr.write(f"loss: {loss}\n")
@@ -162,7 +166,7 @@ class CopyisallyouneedPrefixOnly(nn.Module):
         #     'token_acc': token_acc
         # }
         model_end_time = time()
-        print("model time:", model_end_time - model_st_time)
+        # print("model time:", model_end_time - model_st_time)
         return (
             loss,  # phrase(tok) classification loss
             result_dict
@@ -171,129 +175,129 @@ class CopyisallyouneedPrefixOnly(nn.Module):
     @torch.no_grad()
     def evaluate(self, quiet=True):
         self.model.eval()
-        self.phrase_encoder.eval()
-        data_dir = f'{self.args["training_data_dir"]}/dev'
-        gpt_batch, gpt_label = [], []
-        query_text, phrase_pos = [], []
-        with open(f'{data_dir}/dev_query_tok.jsonl') as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                line = json.loads(line)
-                index, tok_label, query = line['index'], line['results'], line['query']
-                toks, labels, all_pos = [], [], []
-                for tok, label, pos in tok_label:
-                    toks.append(tok)
-                    labels.append(label)
-                    all_pos.append(pos)
-                query_text.append(query)
-                gpt_batch.append(toks)
-                gpt_label.append(labels)
-                phrase_pos.append(all_pos)
-        gpt_reps_list, query_tok_list, gpt_label_list, suffix_pos_list = self.encode_query_ids_batch(gpt_batch, gpt_label, phrase_pos, batch_size=32, quiet=quiet)
-        bert_batch, bert_indexs = [], []
-        with open(f'{data_dir}/dev_document_tok.jsonl') as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                line = json.loads(line)
-                index, toks, idxs = line
-                bert_batch.append(toks)
-                bert_indexs.append(idxs)
-        phrase_reps_list, all_phrases = self.encode_doc_ids_batch(bert_batch, bert_indexs, batch_size=80, quiet=quiet)
-        logits, indexs = [], []
-        topk = 20
-        for gpt_reps in tqdm(gpt_reps_list, desc='Computing IP', disable=quiet):
-            gpt_reps = gpt_reps.cuda()
-            topk_logits = None
-            topk_indexs = None
-            cur_pos = self.vocab_size 
-            for phrase_reps in phrase_reps_list:
-                phrase_reps = phrase_reps.cuda()
-                logits_ = torch.matmul(gpt_reps, phrase_reps.t())
-                topk_logits_, topk_indexs_ = torch.topk(logits_, k=topk, dim=-1)
-                topk_logits_ = topk_logits_.cpu()
-                topk_indexs_ = topk_indexs_.cpu()
-                topk_indexs_ += cur_pos
-                cur_pos += phrase_reps.shape[0]
-                if topk_logits is None:
-                    topk_logits = topk_logits_
-                    topk_indexs = topk_indexs_
-                else:
-                    topk_logits = torch.cat([topk_logits, topk_logits_], dim=-1)
-                    topk_indexs = torch.cat([topk_indexs, topk_indexs_], dim=-1)
-            # token
-            tok_reps = self.token_embeddings
-            if self.dim_proj is not None:
-                tok_reps = self.dim_proj(tok_reps)
-            logits_ = torch.matmul(gpt_reps, tok_reps.t())
-            topk_logits_, topk_indexs_ = torch.topk(logits_, k=topk, dim=-1)
-            topk_logits_ = topk_logits_.cpu()
-            topk_indexs_ = topk_indexs_.cpu()
-            topk_logits = torch.cat([topk_logits, topk_logits_], dim=-1)
-            topk_indexs = torch.cat([topk_indexs, topk_indexs_], dim=-1)
-            logits.append(topk_logits)
-            indexs.append(topk_indexs)
+        phrase_embedding = np.memmap('/apdcephfs/share_916081/ponybwcao/phrase_extraction/data/wikipedia/phrase_embedding_index/PCA_emb_merged.npy', dtype=np.float32, mode='r', shape=(138543105, 128))
+
+        data_fn = f'{self.args["training_data_dir"]}/validation_tok'
+        with open(data_fn) as f:
+            dev_data_queue = f.readlines()
+        # 966 (1024)
+        dev_data_queue = [json.loads(x) for x in tqdm(dev_data_queue)]
+        dev_data_queue.sort(key=lambda x: len(x[0]), reverse=True)
+
+        all_gpt_ids, all_valid_phrases, all_AR_mask = [], [], []
+        for gpt_ids, valid_phrases, AR_mask in dev_data_queue:
+            all_gpt_ids.append(gpt_ids)
+            all_valid_phrases.append(valid_phrases)
+            all_AR_mask.append(AR_mask)
+
+        embeddings = []
+        phrase_list = []
+        emb_idx_map = {}
+        emb_idx_list = []
+        suffix_list = []
+        for instance_idx, valid_phrases in enumerate(all_valid_phrases):
+            suffix_list_ = ['' for _ in range(len(all_gpt_ids[instance_idx]))]
+            for phrase, start_idx, end_idx, ref_pos, suffix in valid_phrases:
+                emb_idx_map[(instance_idx, phrase, start_idx, end_idx)] = len(emb_idx_list)
+                emb_idx_list.append(ref_pos)
+                phrase_list.append(phrase)
+                suffix_list_[start_idx] = suffix
+            suffix_list.append(suffix_list_)
+        if emb_idx_list:
+            embeddings = torch.from_numpy(phrase_embedding[emb_idx_list])
+        else:
+            embeddings = None
+        # print(embeddings.shape) # torch.Size([19806, 128])
         
-        tok_counter, phrase_counter = 0, 0
-        all_result = collections.defaultdict(int)
-        k_list = [0, 1, 3, 5, 10, 20]
-        for logit, index, q_tok, label, suffix_pos in tqdm(zip(logits, indexs, query_tok_list, gpt_label_list, suffix_pos_list), desc='Evaluating', disable=quiet):
-            topk_logits_, topk_indexs_ = torch.topk(logit, k=topk, dim=-1)
-            real_indexs_ = index[torch.tensor(range(index.shape[0])).view(-1, 1), topk_indexs_]
-            for i in range(real_indexs_.shape[0]):
-                topk_pred_ = real_indexs_[i].cpu().tolist()
-                label_ = label[i]
-                tok_ = q_tok[i]
-                if label_ < self.vocab_size: # token
-                    tok_counter += 1
-                    for k_idx in range(len(k_list) - 1):
-                        st, end = k_list[k_idx], k_list[k_idx + 1]
-                        if label_ in topk_pred_[st: end]:
-                            for later_end in range(k_idx + 1, len(k_list)):
-                                all_result[f'token_hit@{k_list[later_end]}'] += 1
-                                all_result[f'global_acc@{k_list[later_end]}'] += 1
-                            break
-                else:
-                    phrase_counter += 1
-                    # hit
-                    for k_idx in range(len(k_list) - 1):
-                        st, end = k_list[k_idx], k_list[k_idx + 1]
-                        if label_ in topk_pred_[st: end]:
-                            for later_end in range(k_idx + 1, len(k_list)):
-                                all_result[f'phrase_hit@{k_list[later_end]}'] += 1
-                            break
-                    
-                    pos_ = suffix_pos[i]
-                    assert pos_[1] != -1
-                    suffix_ = query_text[pos_[0]][pos_[1]:] + ' '
-                    # print(suffix_)
+        batch_size = 8
+        topk = 20
+        embeddings = embeddings.cuda()
+        tok_reps = self.token_embeddings
+        if self.dim_proj is not None:
+            tok_reps = self.dim_proj(tok_reps)
+        candidate_reps = torch.vstack([tok_reps, embeddings])
+        # print(candidate_reps.shape) # torch.Size([70063, 128])
 
-                    # target_phrase = all_phrases[label_ - self.vocab_size]
-                    # # print('target_phrase:', target_phrase)
+        for batch_st in tqdm(range(0, len(all_gpt_ids), batch_size)):
+            batch_end = min(batch_st + batch_size, len(all_gpt_ids))
+            ids_cpu = all_gpt_ids[batch_st: batch_end]
+            AR_mask = all_AR_mask[batch_st: batch_end]
+            batch_valid_phrases = all_valid_phrases[batch_st: batch_end]
 
-                    # recall & acc
-                    valid_counter = 0
-                    for idx in range(topk):
-                        pred_idx_ = topk_pred_[idx]
-                        if (pred_idx_ >= self.vocab_size and suffix_.startswith(all_phrases[pred_idx_ - self.vocab_size] + ' ')) \
-                            or (pred_idx_ < self.vocab_size and pred_idx_ == tok_):
-                            # pred_phrase_ = all_phrases[pred_idx_ - self.vocab_size]
-                            # print('pred_phrase_:', pred_phrase_)
-                            valid_counter += 1
-                            if valid_counter == 1:
-                                for tmp in range(idx, topk):
-                                    if tmp + 1 in k_list[1:]: 
-                                        all_result[f'phrase_acc@{tmp + 1}'] += 1
-                                        all_result[f'global_acc@{tmp + 1}'] += 1
-                        # Recall     
-                        # if idx + 1 in k_list[1:]:
-                        #     all_result[f'phrase_recall@{idx + 1}'] += valid_counter
+            ids_cpu = pad_sequence([torch.LongTensor(x) for x in ids_cpu], padding_value=self.tokenizer.eos_token_id, batch_first=True)
+            AR_mask = pad_sequence([torch.LongTensor(x) for x in AR_mask], padding_value=self.tokenizer.eos_token_id, batch_first=True)
+            gpt2_mask = generate_mask(ids_cpu, pad_token_idx=self.tokenizer.eos_token_id)
+            phrase_label = deepcopy(ids_cpu)
+            seq_len = ids_cpu.shape[1]
+            for local_idx, valid_phrases in enumerate(batch_valid_phrases):
+                instance_idx = local_idx + batch_st
+                for phrase, start_idx, end_idx, ref_pos, suffix in valid_phrases:
+                    emb_idx = emb_idx_map[(instance_idx, phrase, start_idx, end_idx)]
+                    phrase_label[local_idx][start_idx] = len(self.tokenizer) + emb_idx
+            ids = ids_cpu.cuda()
+            AR_mask = AR_mask.cuda()
+            gpt2_mask = gpt2_mask.cuda()
+            gpt_reps = \
+            self.model(input_ids=ids, attention_mask=gpt2_mask, output_hidden_states=True).hidden_states[-1]
+            if self.dim_proj is not None:
+                gpt_reps = self.dim_proj(gpt_reps)
+            AR_loss, acc = self.get_token_loss(ids, gpt_reps, AR_mask, tok_reps, do_eval=True)
+            logits_ = torch.matmul(gpt_reps, candidate_reps.t())
+            topk_logits, topk_indexs = torch.topk(logits_, k=topk, dim=-1)
+            topk_indexs = topk_indexs.cpu()
+            tok_counter, phrase_counter = 0, 0
+            all_result = collections.defaultdict(int)
+            k_list = [0, 1, 3, 5, 10, 20, 100]
+            for instance_idx in range(len(topk_indexs)):
+                tokens, topk_pred, label, suffix = ids_cpu[instance_idx][1:].tolist(), topk_indexs[instance_idx][:-1].tolist(), phrase_label[instance_idx][1:].tolist(), suffix_list[instance_idx][1:]
+                for tok_idx, (tok_, topk_pred_, label_, suffix_) in enumerate(zip(tokens, topk_pred, label, suffix)):
+                    # print(tok_, topk_pred_, label_, suffix_, self.tokenizer.decode(tok_))
+                    if label_ < self.vocab_size: # token
+                        tok_counter += 1
+                        for k_idx in range(len(k_list) - 1):
+                            st, end = k_list[k_idx], k_list[k_idx + 1]
+                            if label_ in topk_pred_[st: end]:
+                                for later_end in range(k_idx + 1, len(k_list)):
+                                    all_result[f'token_hit@{k_list[later_end]}'] += 1
+                                    all_result[f'global_acc@{k_list[later_end]}'] += 1
+                                break
+                    else:
+                        phrase_counter += 1
+                        # hit
+                        for k_idx in range(len(k_list) - 1):
+                            st, end = k_list[k_idx], k_list[k_idx + 1]
+                            if label_ in topk_pred_[st: end]:
+                                for later_end in range(k_idx + 1, len(k_list)):
+                                    all_result[f'phrase_hit@{k_list[later_end]}'] += 1
+                                break
+                        if not suffix:
+                            suffix_ = self.tokenizer.decode(tokens[tok_idx:tok_idx+72]) + ' '
+                        else:
+                            suffix_ += ' '
+                        # print(suffix_)
 
-        # for k, v in all_result.items():
-        #     print('%s: %.4f' % (k, v / counter))
+                        # target_phrase = phrase_list[label_ - self.vocab_size]
+                        # # print('target_phrase:', target_phrase)
+
+                        # recall & acc
+                        valid_counter = 0
+                        for idx in range(topk):
+                            pred_idx_ = topk_pred_[idx]
+                            if (pred_idx_ >= self.vocab_size and suffix_.startswith(phrase_list[pred_idx_ - self.vocab_size] + ' ')) \
+                                or (pred_idx_ < self.vocab_size and pred_idx_ == tok_):
+                                # pred_phrase_ = phrase_list[pred_idx_ - self.vocab_size]
+                                # print('pred_phrase_:', pred_phrase_)
+                                valid_counter += 1
+                                if valid_counter == 1:
+                                    for tmp in range(idx, topk):
+                                        if tmp + 1 in k_list[1:]: 
+                                            all_result[f'phrase_acc@{tmp + 1}'] += 1
+                                            all_result[f'global_acc@{tmp + 1}'] += 1
+                            # Recall     
+                            # if idx + 1 in k_list[1:]:
+                            #     all_result[f'phrase_recall@{idx + 1}'] += valid_counter
+            # for k, v in all_result.items():
+            #     print('%s: %.4f' % (k, v / counter))
         return all_result, tok_counter, phrase_counter
 
     @torch.no_grad()
@@ -315,79 +319,6 @@ class CopyisallyouneedPrefixOnly(nn.Module):
         std = torch.std(phrase_reps, dim=0)
         phrase_num = phrase_reps.shape[0]
         return phrase_num, mean, std
-
-    @torch.no_grad()
-    def encode_query_ids_batch(self, gpt_batch, gpt_label, phrase_pos, batch_size=128, device='cuda', quiet=True):
-        all_query_reps = []
-        all_query_toks = []
-        all_gpt2_labels = []
-        suffix_pos_list = []
-        for st in tqdm(range(0, len(gpt_batch), batch_size), desc='Encoding queries', disable=quiet):
-            end = min(st + batch_size, len(gpt_batch))
-            gpt2_ids = gpt_batch[st: end]
-            labels = gpt_label[st: end]
-            gpt2_ids_cpu = pad_sequence([torch.LongTensor(i) for i in gpt2_ids], padding_value=self.tokenizer.eos_token_id, batch_first=True)
-            max_length = gpt2_ids_cpu.shape[1]
-            suffix_pos = []
-            for all_pos in phrase_pos[st: end]:
-                suffix_pos.extend(all_pos[1:] + ["" for _ in range(max_length - len(all_pos))])
-
-            gpt2_ids = gpt2_ids_cpu.cuda()
-            gpt2_mask = generate_mask(gpt2_ids, pad_token_idx=self.tokenizer.eos_token_id).cuda()
-            query_reps = self.model(input_ids=gpt2_ids, attention_mask=gpt2_mask, output_hidden_states=True).hidden_states[-1]
-            if self.dim_proj is not None:
-                query_reps = self.dim_proj(query_reps)
-            gpt2_labels_cpu = pad_sequence([torch.LongTensor(i) for i in labels], padding_value=self.tokenizer.eos_token_id, batch_first=True)
-            query_reps = query_reps.cpu()
-            valid_mask = gpt2_mask[:, 1:].reshape(-1).to(torch.bool).cpu()
-            query_reps = query_reps[:, :-1].reshape(-1, query_reps.shape[-1])[valid_mask]
-            gpt2_labels_cpu = gpt2_labels_cpu[:, 1:].reshape(-1)[valid_mask]
-
-            valid_idx = torch.nonzero(valid_mask).view(-1).tolist()
-            suffix_pos = [suffix_pos[idx] for idx in valid_idx]
-
-            all_query_reps.append(query_reps)
-            all_query_toks.append(gpt2_ids_cpu[:, :-1].reshape(-1)[valid_mask])
-            all_gpt2_labels.append(gpt2_labels_cpu)
-            suffix_pos_list.append(suffix_pos)
-        return all_query_reps, all_query_toks, all_gpt2_labels, suffix_pos_list
-    
-    @torch.no_grad()
-    def encode_doc_ids_batch(self, bert_batch, bert_indexs, batch_size=128, device='cuda', quiet=True):
-        phrase_reps = []
-        all_phrases = []
-        for st in tqdm(range(0, len(bert_batch), batch_size), desc='Encoding docs', disable=quiet):
-            end = min(st + batch_size, len(bert_batch))
-            bert_ids = bert_batch[st: end]
-            indexs = bert_indexs[st: end]
-
-            max_bert_length = max([len(i) for i in bert_ids])
-            start_idxs, end_idxs = [], []
-            phrases_ = []
-            for doc_idx, (ids, all_idx) in enumerate(zip(bert_ids, indexs)):
-                for st_idx_, end_idx_, phrase_str in all_idx:
-                    start_idxs.append(st_idx_ + doc_idx * max_bert_length)
-                    end_idxs.append(end_idx_ + doc_idx * max_bert_length)
-                    phrases_.append(phrase_str)
-            start_idxs = torch.LongTensor(start_idxs).cuda()
-            end_idxs = torch.LongTensor(end_idxs).cuda()
-
-            bert_ids = pad_sequence([torch.LongTensor(i) for i in bert_ids], padding_value=self.bert_tokenizer.pad_token_id, batch_first=True).cuda()
-            bert_mask = generate_mask(bert_ids, pad_token_idx=self.bert_tokenizer.pad_token_id).cuda()
-
-            output = self.phrase_encoder(bert_ids, bert_mask, output_hidden_states=True)['hidden_states'][-1]  # [B, S, E]
-            s_rep = self.s_proj(output)
-            e_rep = self.e_proj(output)
-            s_rep = s_rep.reshape(-1, s_rep.size(-1))
-            e_rep = e_rep.reshape(-1, e_rep.size(-1))  # [B_doc*S_doc, 768//2]
-            doc_phrase_st_rep = s_rep[start_idxs]
-            doc_phrase_end_rep = e_rep[end_idxs]
-            doc_phrase_rep = torch.cat([doc_phrase_st_rep, doc_phrase_end_rep], dim=-1)
-            if self.dim_proj is not None:
-                doc_phrase_rep = self.dim_proj(doc_phrase_rep)
-            phrase_reps.append(doc_phrase_rep.cpu())
-            all_phrases.extend(phrases_)
-        return phrase_reps, all_phrases
 
     @torch.no_grad()
     def encode_doc_batch(self, sentences, batch_size=128, device='cuda'):

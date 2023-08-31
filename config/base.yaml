@@ -14,8 +14,8 @@ models:
             train_asyn: CopyisallyouneedAllRefV2Asyn
             train_pipeline: CopyisallyouneedAllRefV2Pipeline
             # train: CopyisallyouneedNegPrebatch
-            test: CopyisallyouneedAllRefV2Pipeline
-            # test: CopyisallyouneedNegPrebatch
+            test: CopyisallyouneedPrefixOnly
+            # test: CopyisallyouneedAllRefV2Pipeline
             queryside: CopyisallyouneedQueryside
             baseline: Copyisallyouneed
         dataset_name: 

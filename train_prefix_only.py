@@ -4,6 +4,7 @@ from models import *
 from config import *
 import sys, os, datetime
 import torch.multiprocessing as mp
+from time import time
 
 def parser_args():
     parser = argparse.ArgumentParser(description='train parameters')
@@ -45,7 +46,7 @@ def data_proc(args, queue):
 def asynchronous_load(args):
     queue = mp.Queue(50)
     data_generator = mp.Process(target=data_proc, args=(args, queue))
-    # data_generator.daemon = True
+    data_generator.daemon = True
     data_generator.start()
     while True:
         batch = queue.get()
@@ -64,8 +65,8 @@ def main(**args):
     config = load_config(args)
     args.update(config)
 
-    # __stderr__ = sys.stderr
-    # sys.stderr = open(f'{args["log_dir"]}/{args["mode"]}/{args["version"]}.error', 'a')
+    __stderr__ = sys.stderr
+    sys.stderr = open(f'{args["log_dir"]}/{args["mode"]}/{args["version"]}.error', 'a')
 
     if args['local_rank'] == 0:
         # sum_writer = SummaryWriter(
@@ -88,6 +89,7 @@ def main(**args):
     #         print(f'[!] load latest step: {current_step}')
     if args['local_rank'] == 0:
         print('[!] model process:', os.getpid())
+    training_st_time = time()
     for batch in asynchronous_load(args):
         agent.train_model(
             batch, 
@@ -97,11 +99,15 @@ def main(**args):
         )
         current_step += 1
         if args['global_rank'] == 0 and current_step % args['save_every'] == 0 and current_step > 0:
-            # agent.evaluate_model(current_step)
+            agent.evaluate_model(current_step)
             save_path = f'{args["root_dir"]}/ckpt/{args["dataset"]}/{args["model"]}/{args["mode"]}/best_{args["version"]}_{current_step}.pt'
             agent.save_model_long(save_path, current_step)
+            if args['local_rank'] == 0:
+                sys.stderr.write(f'step: {current_step}, time: {(time() - training_st_time) // 60:.2f}\n')
         if current_step >= args['total_step']:
             # over_train_flag = True
+            if args['local_rank'] == 0:
+                sys.stderr.write('Finish.\n')
             break
         # if over_train_flag:
         #     break

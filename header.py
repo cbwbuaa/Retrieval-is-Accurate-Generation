@@ -22,18 +22,18 @@ import re
 import math
 from itertools import chain
 import csv
-import jieba
-from jieba import analyse
-import jieba.posseg as pseg
+# import jieba
+# from jieba import analyse
+# import jieba.posseg as pseg
 import random
 import json
-import ijson
+# import ijson
 import time
 import pprint
 import hashlib
 import logging
 from copy import deepcopy
-import ipdb
+# import ipdb
 import transformers
 from transformers import BertTokenizer, AutoModel, AutoConfig, AutoTokenizer, GPT2LMHeadModel
 import pickle
@@ -41,12 +41,12 @@ from torch.cuda.amp import autocast, GradScaler
 import argparse
 from torch.nn.utils.rnn import pad_sequence
 import joblib
-from elasticsearch import Elasticsearch, helpers
+# from elasticsearch import Elasticsearch, helpers
 import faiss
 import torch.multiprocessing
 import linecache
-import nanopq
-from scipy.stats import pearsonr, spearmanr
+# import nanopq
+# from scipy.stats import pearsonr, spearmanr
 # from parallel.locker import MutexMap
 # from parallel.owned_mutex import WithMutex
 # from parallel.paralled_task import ParalledTask

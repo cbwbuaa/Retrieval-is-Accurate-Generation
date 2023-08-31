@@ -39,7 +39,7 @@ train:
     batch_size: 4
     max_len: 1024
     # max_doc_size: 32
-    buffer_size: 50
+    buffer_size: 10000
     # total_step: 100001
     # save_every: 10000
     # doc_max_length: 512

@@ -12,7 +12,7 @@ class CopyisallyouneedPrefixOnly(Dataset):
         self.vocab = AutoTokenizer.from_pretrained(args['prefix_encoder_tokenizer'][args['lang']])
 
         self.data_root_path = args['data_root_dir']
-        self.phrase_embedding = np.memmap('/apdcephfs/share_916081/shared_info/ponybwcao/phrase_extraction/data/wikipedia/phrase_embedding_index/PCA_emb_merged.npy', dtype=np.float32, mode='r', shape=(139228595, 128))
+        self.phrase_embedding = np.memmap('/apdcephfs/share_916081/ponybwcao/phrase_extraction/data/wikipedia/phrase_embedding_index/PCA_emb_merged.npy', dtype=np.float32, mode='r', shape=(138543105, 128))
         self.file_lists = [f'{args["training_data_dir"]}/train_chunk{args["local_rank"]}']
         if args['local_rank'] == 0:
             print(f'[!] file list for worker{self.args["local_rank"]}: {self.file_lists}')
@@ -27,7 +27,7 @@ class CopyisallyouneedPrefixOnly(Dataset):
         self.batch_size = args['batch_size']
 
         self.cache = []
-        self.data_queue = []
+        # self.data_queue = []
         # self.data_queue_size = 10000 # perhaps 1% overlap when 5000
         self.update_step = 0
         self._init_data_queue()
@@ -39,8 +39,8 @@ class CopyisallyouneedPrefixOnly(Dataset):
 
     def _init_data_queue(self):
         self.load_one_part()
-        self.process_one_part(quiet=self.args['local_rank']!=0, desc='Initializing data queue')
-        random.shuffle(self.data_queue)
+        # self.process_one_part(quiet=False, desc=f'Worker{self.args["local_rank"]} initializing data queue')
+        # random.shuffle(self.data_queue)
 
     def load_one_part(self):
         self.cache = load_lines_chunk(self.current_file_handler, self.buffer_size)
@@ -49,13 +49,12 @@ class CopyisallyouneedPrefixOnly(Dataset):
             self.current_file_index = 0 if self.current_file_index == len(self.file_lists) - 1 else self.current_file_index + 1
             self.current_file_handler = open(self.file_lists[self.current_file_index], 'r')
             self.cache += load_lines_chunk(self.current_file_handler, self.buffer_size - len(self.cache))
-            if self.args['local_rank'] == 0:
-                with open(f'{args["log_dir"]}/{args["mode"]}/{args["version"]}.error', 'a') as f:
-                    f.write(f'\n0-0 finish epoch.\n')
-        self.cache = [json.loads(x) for x in self.cache]
-        # random.shuffle(self.cache)
+            with open(f'{args["log_dir"]}/{args["mode"]}/{args["version"]}.error', 'a') as f:
+                f.write(f'\n{self.args["local_rank"]} finish epoch.\n')
+        # self.cache = [json.loads(x) for x in self.cache]
+        random.shuffle(self.cache)
 
-    def process_one_part(self, quiet=True, desc=''):
+    def _process_one_part(self, quiet=True, desc=''):
         stride = self.max_input_length
         for line in tqdm(self.cache, desc=desc, disable=quiet):
             document = line['doc']
@@ -107,7 +106,7 @@ class CopyisallyouneedPrefixOnly(Dataset):
                             break
                 self.data_queue.append([gpt_ids, valid_phrases, AR_mask])
 
-    def load_one_batch(self):
+    def _load_one_batch(self):
         all_gpt_ids, all_valid_phrases, all_AR_mask = [], [], []
         for _ in range(self.batch_size):
             if not self.data_queue:
@@ -115,6 +114,17 @@ class CopyisallyouneedPrefixOnly(Dataset):
                 self.process_one_part()
                 random.shuffle(self.data_queue)
             gpt_ids, valid_phrases, AR_mask = self.data_queue.pop(0)
+            all_gpt_ids.append(gpt_ids)
+            all_valid_phrases.append(valid_phrases)
+            all_AR_mask.append(AR_mask)
+        return all_gpt_ids, all_valid_phrases, all_AR_mask
+
+    def load_one_batch(self):
+        all_gpt_ids, all_valid_phrases, all_AR_mask = [], [], []
+        for _ in range(self.batch_size):
+            if not self.cache:
+                self.load_one_part()
+            gpt_ids, valid_phrases, AR_mask = json.loads(self.cache.pop(0))
             all_gpt_ids.append(gpt_ids)
             all_valid_phrases.append(valid_phrases)
             all_AR_mask.append(AR_mask)
@@ -179,7 +189,7 @@ class CopyisallyouneedPrefixOnly(Dataset):
         # all_phrase_label = torch.LongTensor(all_phrase_label)
         # all_phrase_mask = torch.LongTensor(all_phrase_mask)
         end_time = time()
-        print(f"data worker{self.args['local_rank']} time:", end_time - data_st_time)
+        # print(f"data worker{self.args['local_rank']} time:", end_time - data_st_time)
         # print(all_gpt_ids.shape)
         # print(all_AR_mask.shape)
         # print(all_gpt2_mask.shape)
