@@ -96,13 +96,13 @@ class CopyisallyouneedPrefixOnly(nn.Module):
             phrase_rep], dim=0)
     
         false_neg_mask = batch['false_neg_mask'].cuda()
-        false_neg_mask = false_neg_mask.reshape(-1, false_neg_mask.shape[-1])
+        # false_neg_mask = false_neg_mask.reshape(-1, false_neg_mask.shape[-1])
         labels = batch['phrase_label'].cuda()
         
         query = query_hidden_states[:, :-1].reshape(-1, query_hidden_states.shape[-1])
         query_mask = AR_mask[:, 1:].reshape(-1).to(torch.bool)
         query = query[query_mask]
-        labels = labels[:, :-1].reshape(-1)
+        labels = labels[:, 1:].reshape(-1)
         labels = labels[query_mask]
         phrase_indexes = labels >= self.vocab_size
         # print('query:', query.shape, labels.shape, phrase_indexes.sum().item())
@@ -112,11 +112,18 @@ class CopyisallyouneedPrefixOnly(nn.Module):
 
         logits = torch.matmul(query, candidate_reps.t())
         logits /= self.args['temp']
-        full_false_neg_mask = torch.ones_like(logits).to(torch.long)
-        full_false_neg_mask[phrase_indexes] = false_neg_mask
-
+        # full_false_neg_mask = torch.ones_like(logits).to(torch.long)
+        # try:
+        #     full_false_neg_mask[phrase_indexes] = false_neg_mask
+        # except:
+        #     print(batch)
+        #     print(self.tokenizer.decode(batch['gpt2_ids'][0]))
+        #     exit()
+        false_neg_mask = false_neg_mask[:, 1:].reshape(-1, false_neg_mask.shape[-1])
+        false_neg_mask = false_neg_mask[query_mask]
+        
         # print(false_neg_mask.shape, logits.shape)
-        logits = torch.where(full_false_neg_mask.to(torch.bool), logits, torch.tensor(-np.inf).to(torch.half).cuda())
+        logits = torch.where(false_neg_mask.to(torch.bool), logits, torch.tensor(-np.inf).to(torch.half).cuda())
         if torch.isnan(logits).any():
             sys.stderr.write(f"logits nan\n")
             sys.stderr.write(f"logits: {logits}\n")
@@ -181,7 +188,7 @@ class CopyisallyouneedPrefixOnly(nn.Module):
         with open(data_fn) as f:
             dev_data_queue = f.readlines()
         # 966 (1024)
-        dev_data_queue = [json.loads(x) for x in tqdm(dev_data_queue)]
+        dev_data_queue = [json.loads(x) for x in dev_data_queue]
         dev_data_queue.sort(key=lambda x: len(x[0]), reverse=True)
 
         all_gpt_ids, all_valid_phrases, all_AR_mask = [], [], []
@@ -209,7 +216,7 @@ class CopyisallyouneedPrefixOnly(nn.Module):
             embeddings = None
         # print(embeddings.shape) # torch.Size([19806, 128])
         
-        batch_size = 8
+        batch_size = 4
         topk = 20
         embeddings = embeddings.cuda()
         tok_reps = self.token_embeddings
@@ -218,7 +225,7 @@ class CopyisallyouneedPrefixOnly(nn.Module):
         candidate_reps = torch.vstack([tok_reps, embeddings])
         # print(candidate_reps.shape) # torch.Size([70063, 128])
 
-        for batch_st in tqdm(range(0, len(all_gpt_ids), batch_size)):
+        for batch_st in tqdm(range(0, len(all_gpt_ids), batch_size), disable=quiet):
             batch_end = min(batch_st + batch_size, len(all_gpt_ids))
             ids_cpu = all_gpt_ids[batch_st: batch_end]
             AR_mask = all_AR_mask[batch_st: batch_end]

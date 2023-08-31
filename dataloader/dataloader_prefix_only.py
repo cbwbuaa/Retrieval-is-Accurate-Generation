@@ -13,7 +13,7 @@ class CopyisallyouneedPrefixOnly(Dataset):
 
         self.data_root_path = args['data_root_dir']
         self.phrase_embedding = np.memmap('/apdcephfs/share_916081/ponybwcao/phrase_extraction/data/wikipedia/phrase_embedding_index/PCA_emb_merged.npy', dtype=np.float32, mode='r', shape=(138543105, 128))
-        self.file_lists = [f'{args["training_data_dir"]}/train_chunk{args["local_rank"]}']
+        self.file_lists = [f'{args["training_data_dir"]}/train_chunk{args["local_rank"]}_tok']
         if args['local_rank'] == 0:
             print(f'[!] file list for worker{self.args["local_rank"]}: {self.file_lists}')
         
@@ -154,13 +154,14 @@ class CopyisallyouneedPrefixOnly(Dataset):
 
         # process the gpt2_batch
         all_gpt_ids = pad_sequence([torch.LongTensor(x) for x in all_gpt_ids], padding_value=self.vocab.eos_token_id, batch_first=True)
-        all_AR_mask = pad_sequence([torch.LongTensor(x) for x in all_AR_mask], padding_value=self.vocab.eos_token_id, batch_first=True)
+        all_AR_mask = pad_sequence([torch.LongTensor(x) for x in all_AR_mask], padding_value=0, batch_first=True)
         all_gpt2_mask = generate_mask(all_gpt_ids, pad_token_idx=self.vocab.eos_token_id)
         # all_phrase_mask = deepcopy(all_AR_mask)
         all_phrase_label = deepcopy(all_gpt_ids)
+        all_false_neg_mask = torch.ones(*all_gpt_ids.shape, len(self.vocab) + len(phrase_list))
 
         # all_phrase_mask, all_phrase_label = [], []
-        all_false_neg_mask = []
+        # all_false_neg_mask = []
         seq_len = all_gpt_ids.shape[1]
         # print('seq_len:', seq_len)
         for instance_idx, valid_phrases in enumerate(all_valid_phrases):
@@ -173,19 +174,21 @@ class CopyisallyouneedPrefixOnly(Dataset):
                 # all_phrase_label.append(len(self.vocab) + emb_idx)
                 all_phrase_label[instance_idx][start_idx] = len(self.vocab) + emb_idx
                 # false neg
-                false_neg_mask_ = [1 for _ in range(len(self.vocab) + len(phrase_list))]
+                # false_neg_mask_ = [1 for _ in range(len(self.vocab) + len(phrase_list))]
                 suffix += ' '
                 for can_idx, candidate in enumerate(phrase_list):
                     if can_idx == emb_idx:
                         continue
                     candidate += ' '
                     if suffix.startswith(candidate):
-                        false_neg_mask_[len(self.vocab) + can_idx] = 0
-                all_false_neg_mask.append(false_neg_mask_)
+                        all_false_neg_mask[instance_idx, start_idx, len(self.vocab) + can_idx] = 0
+                        # false_neg_mask_[len(self.vocab) + can_idx] = 0
+                # all_false_neg_mask.append(false_neg_mask_)
             # all_phrase_mask.append(phrase_mask_)
 
         # prepare the batch
-        all_false_neg_mask = torch.LongTensor(all_false_neg_mask)
+        all_false_neg_mask = all_false_neg_mask.to(torch.bool)
+        # all_false_neg_mask = torch.LongTensor(all_false_neg_mask)
         # all_phrase_label = torch.LongTensor(all_phrase_label)
         # all_phrase_mask = torch.LongTensor(all_phrase_mask)
         end_time = time()
