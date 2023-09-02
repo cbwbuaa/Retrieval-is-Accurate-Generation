@@ -8,9 +8,10 @@ from time import time
 
 def parser_args():
     parser = argparse.ArgumentParser(description='train parameters')
-    parser.add_argument('--dataset', default='ecommerce', type=str)
+    parser.add_argument('--dataset', default='wikipedia', type=str)
     parser.add_argument('--model', type=str)
-    parser.add_argument('--mode', type=str, default='train_pipeline')
+    parser.add_argument('--mode', type=str, default='train')
+    parser.add_argument('--model_size', type=str, default='small')
     parser.add_argument('--loss_type', type=str, default='focal_loss')
     parser.add_argument('--version', type=str)
     parser.add_argument('--pretrain_model_path', type=str)
@@ -19,7 +20,6 @@ def parser_args():
     parser.add_argument('--local_rank', type=int)
     parser.add_argument('--total_step', type=int)
     parser.add_argument('--save_every', type=int)
-    parser.add_argument('--prebatch_step', type=int, default=5)
     parser.add_argument('--total_workers', type=int)
     parser.add_argument('--resume', type=bool, default=False)
     parser.add_argument('--random_initialize', type=bool, default=False)
@@ -30,8 +30,8 @@ def parser_args():
     parser.add_argument('--lr', type=float, default=5e-5)
     parser.add_argument('--iter_to_accumulate', type=int, default=1)
     parser.add_argument('--warmup_step', type=int, default=0)
-    parser.add_argument('--prebatch_num', type=int, default=1000)
-    parser.add_argument('--phrase_dim', type=int, default=256)
+    parser.add_argument('--phrase_dim', type=int, default=128)
+    parser.add_argument('--batch_size', type=int, default=4)
     return parser.parse_args()
 
 # no prebatch

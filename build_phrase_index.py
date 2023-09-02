@@ -183,6 +183,24 @@ def merge_result():
             global_idx_list.extend(text_idx['idx'])
     save_emb({'phrase': global_text_list, 'idx': global_idx_list}, f'{input_dir}/text_idx_list.pkl')
 
+def build_index():
+    ngpu = faiss.get_num_gpus()
+    gpu_resources = []
+    for i in range(ngpu):
+        res = faiss.StandardGpuResources()
+        # res.setTempMemory(tempmem)
+        gpu_resources.append(res)
+    vres = faiss.GpuResourcesVector()
+    vdev = faiss.IntVector()
+    for i in range(ngpu):
+        vdev.push_back(i)
+        vres.push_back(gpu_resources[i])
+    co = faiss.GpuMultipleClonerOptions()
+    co.shard = True
+    index = faiss.index_cpu_to_gpu_multiple(
+        vres, vdev, faiss.IndexFlatIP(128), co)
+    return index
+    
 def generation(**args):
     args['mode'] = 'test'
     config = load_config(args)
@@ -192,49 +210,20 @@ def generation(**args):
     # agent.load_model(f'{args["root_dir"]}/ckpt/wikitext103/copyisallyouneed/train/{args["model_name"]}.pt')
     print(f'[!] init model over')
 
-    # get token embeddings
-    # token_emb = agent.model.token_embeddings.cpu().detach().numpy()
-    # token_list = [agent.model.tokenizer.convert_ids_to_tokens(i) for i in range(token_emb.shape[0])]
-    
-    # phrase_list = load_emb(f'/apdcephfs/share_916081/shared_info/ponybwcao/Copyisallyouneed/phrase_index/{args["model_name"]}/cluster_text_list.pkl')
-    phrase_list = load_emb('/apdcephfs/share_916081/shared_info/ponybwcao/Copyisallyouneed/phrase_index/best_prebatch_neg0_pretrain40w_1000000/cluster_text_list.pkl')
+    phrase_list = load_emb('/apdcephfs/share_916081/ponybwcao/phrase_extraction/data/wikipedia/phrase_embedding_index/PCA_phrase_merged.pkl')
     # phrase_list += token_list
 
-    # phrase_emb = None
-    # for i in tqdm(range(8), desc='Loading phrase embbeding'):
-    #     path = f'/apdcephfs/share_916081/shared_info/ponybwcao/Copyisallyouneed/phrase_index/best_prebatch_neg0_pretrain40w_1000000/phrase_{i}.npy'
-    #     data = np.load(path)
-    #     if phrase_emb is None:
-    #         phrase_emb = data
-    #     else:
-    #         phrase_emb = np.vstack((phrase_emb, data))
-    # retriever = faiss.IndexFlatIP(768)
-    # retriever.add(phrase_emb)
-    # retriever.add(token_emb)
-    # name = 'pq'
-    name = 'hnsw32pq96'
-    trained_index_path = f'/apdcephfs/share_916081/shared_info/ponybwcao/Copyisallyouneed/phrase_index/{args["model_name"]}/IP_{name}_index.faiss'
-    retriever = faiss.read_index(trained_index_path)
-    if 'hnsw' in name:
-        retriever.hnsw.efSearch = 256
-    
-    if 'ivf' in name:
-        retriever.nprobe = 32
-        res = faiss.StandardGpuResources()
-        co = faiss.GpuClonerOptions()
-        co.useFloat16 = True
-        retriever = faiss.index_cpu_to_gpu(res, 0, retriever, co)
-    else:
-        res = faiss.StandardGpuResources()
-        retriever = faiss.index_cpu_to_gpu(res, 0, retriever)
-
+    retriever = build_index()
+    embedding = np.memmap('/apdcephfs/share_916081/ponybwcao/phrase_extraction/data/wikipedia/phrase_embedding_index/PCA_emb_merged.npy', dtype=np.float32, mode='r', shape=(138543105, 128))
+    retriever.add(embedding)
     print(f'[!] init retriever over')
 
     collection = []
-    with open(f'../data/wikitext103_1024/test.txt') as f:
+    with open(f'/apdcephfs/share_916081/ponybwcao/phrase_extraction/data/minipile/raw/test.jsonl') as f:
         # collect the valid prefixes
         texts = []
         for line in tqdm(f.readlines()):
+            line = json.loads(line)['text']
             ids = agent.model.tokenizer.encode(line, add_special_tokens=False)
             prefix, reference = ids[:32], ids[32:]
             if len(prefix) == 32:

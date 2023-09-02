@@ -29,8 +29,9 @@ loss_type=focal_loss
 warmup_step=10000
 lr=1e-4
 phrase_dim=128
-
-version=0831_test
+model_size=small
+batch_size=4
+version=0901_${model_size}_bs${batch_size}_temp${temp}_focal_lr${lr}
 
 # pretrain_model_path=/apdcephfs/share_916081/shared_info/ponybwcao/Copyisallyouneed/ckpt/wikitext103/copyisallyouneed/train_pipeline/best_0601_shuffle_queue5k_mergedQ_eval1k_dim128_focal_loss_lr1e-4_prebatch0_beta0.5_warmup50000_prenum0_temp2.0_400000.pt
 training_data_dir=/apdcephfs/share_916081/ponybwcao/phrase_extraction/data/minipile/match_result_tok
@@ -49,7 +50,7 @@ recoder_file=$root_dir/rest/$dataset/$model/recoder_train_$version.txt
 
 gpu_ids=(${cuda//,/ })
 CUDA_VISIBLE_DEVICES=$cuda python3.8 -m torch.distributed.launch --nproc_per_node=${#gpu_ids[@]} --master_addr 127.0.0.1 --master_port 28445 train_prefix_only.py \
-    --total_step 100000 \
+    --total_step 150000 \
     --save_every 10000 \
     --dataset $dataset \
     --model $model \
@@ -63,6 +64,8 @@ CUDA_VISIBLE_DEVICES=$cuda python3.8 -m torch.distributed.launch --nproc_per_nod
     --beta $beta \
     --warmup_step $warmup_step \
     --lr $lr \
-    --phrase_dim $phrase_dim
+    --phrase_dim $phrase_dim \
+    --model_size $model_size \
+    --batch_size $batch_size
     #--random_initialize true #> $root_dir/log/train_pipeline/${version}.error 2>&1 &
     # --pretrain_model_path $pretrain_model_path \

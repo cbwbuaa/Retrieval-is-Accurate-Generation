@@ -20,14 +20,14 @@ class CopyisallyouneedPrefixOnly(nn.Module):
                 print('[!] model random initialized.')
             # GPT model
             GPT_config = AutoConfig.from_pretrained(
-                self.args['prefix_encoder_model'][self.args['lang']]
+                self.args['prefix_encoder_model'][self.args['lang']][self.args['model_size']]
             )
             self.model = GPT2LMHeadModel(GPT_config)
             # self.model = AutoModel.from_config(GPT_config)
         else:
-            self.model = GPT2LMHeadModel.from_pretrained(self.args['prefix_encoder_model'][self.args['lang']])
+            self.model = GPT2LMHeadModel.from_pretrained(self.args['prefix_encoder_model'][self.args['lang']][self.args['model_size']])
         # GPT tokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained(self.args['prefix_encoder_tokenizer'][self.args['lang']])
+        self.tokenizer = AutoTokenizer.from_pretrained(self.args['prefix_encoder_tokenizer'][self.args['lang']][self.args['model_size']])
 
         self.vocab_size = len(self.tokenizer)
         self.pad = self.tokenizer.pad_token_id if self.args['lang'] == 'zh' else self.tokenizer.eos_token_id
@@ -47,10 +47,10 @@ class CopyisallyouneedPrefixOnly(nn.Module):
         output = self.model(input_ids=ids, output_hidden_states=True)['hidden_states'][-1][:, -1, :]
         return output
 
-    def get_token_loss(self, ids, hs, AR_mask, token_reps, do_eval=True):
-        AR_mask = AR_mask.to(torch.bool)
+    def get_token_loss(self, ids, hs, mask, token_reps, do_eval=True):
+        mask = mask.to(torch.bool)
         label = ids[:, 1:].reshape(-1)
-        label_mask = AR_mask[:, 1:].reshape(-1)
+        label_mask = mask[:, 1:].reshape(-1)
         label = label[label_mask]
         logits = torch.matmul(
             hs[:, :-1, :],
@@ -78,12 +78,12 @@ class CopyisallyouneedPrefixOnly(nn.Module):
             token_reps = self.dim_proj(token_reps)
         
         ## gpt2 query encoder
-        ids, ids_mask, AR_mask = batch['gpt2_ids'].cuda(), batch['gpt2_mask'].cuda(), batch['AR_mask'].to(torch.bool).cuda()
+        ids, ids_mask = batch['gpt2_ids'].cuda(), batch['gpt2_mask'].cuda()
         query_hidden_states = \
         self.model(input_ids=ids, attention_mask=ids_mask, output_hidden_states=True).hidden_states[-1]
         if self.dim_proj is not None:
             query_hidden_states = self.dim_proj(query_hidden_states)
-        AR_loss, acc = self.get_token_loss(ids, query_hidden_states, AR_mask, token_reps, do_eval=True)
+        AR_loss = self.get_token_loss(ids, query_hidden_states, ids_mask, token_reps, do_eval=False)
         # print('AR_loss_acc:', AR_loss, acc)
 
         phrase_rep = batch['phrase_embedding']
@@ -95,12 +95,9 @@ class CopyisallyouneedPrefixOnly(nn.Module):
             token_reps,
             phrase_rep], dim=0)
     
-        false_neg_mask = batch['false_neg_mask'].cuda()
-        # false_neg_mask = false_neg_mask.reshape(-1, false_neg_mask.shape[-1])
         labels = batch['phrase_label'].cuda()
-        
         query = query_hidden_states[:, :-1].reshape(-1, query_hidden_states.shape[-1])
-        query_mask = AR_mask[:, 1:].reshape(-1).to(torch.bool)
+        query_mask = ids_mask[:, 1:].reshape(-1).to(torch.bool)
         query = query[query_mask]
         labels = labels[:, 1:].reshape(-1)
         labels = labels[query_mask]
@@ -112,13 +109,8 @@ class CopyisallyouneedPrefixOnly(nn.Module):
 
         logits = torch.matmul(query, candidate_reps.t())
         logits /= self.args['temp']
-        # full_false_neg_mask = torch.ones_like(logits).to(torch.long)
-        # try:
-        #     full_false_neg_mask[phrase_indexes] = false_neg_mask
-        # except:
-        #     print(batch)
-        #     print(self.tokenizer.decode(batch['gpt2_ids'][0]))
-        #     exit()
+
+        false_neg_mask = batch['false_neg_mask'].cuda()
         false_neg_mask = false_neg_mask[:, 1:].reshape(-1, false_neg_mask.shape[-1])
         false_neg_mask = false_neg_mask[query_mask]
         
@@ -184,40 +176,38 @@ class CopyisallyouneedPrefixOnly(nn.Module):
         self.model.eval()
         phrase_embedding = np.memmap('/apdcephfs/share_916081/ponybwcao/phrase_extraction/data/wikipedia/phrase_embedding_index/PCA_emb_merged.npy', dtype=np.float32, mode='r', shape=(138543105, 128))
 
-        data_fn = f'{self.args["training_data_dir"]}/validation_tok'
+        data_fn = f'{self.args["training_data_dir"]}/validation_tok_{self.args["model_size"]}'
         with open(data_fn) as f:
             dev_data_queue = f.readlines()
         # 966 (1024)
         dev_data_queue = [json.loads(x) for x in dev_data_queue]
         dev_data_queue.sort(key=lambda x: len(x[0]), reverse=True)
 
-        all_gpt_ids, all_valid_phrases, all_AR_mask = [], [], []
-        for gpt_ids, valid_phrases, AR_mask in dev_data_queue:
+        all_gpt_ids, all_valid_phrases, all_document, all_global_suffix_st_char = [], [], [], []
+        for gpt_ids, valid_phrases, document, global_suffix_st_char in dev_data_queue:
             all_gpt_ids.append(gpt_ids)
             all_valid_phrases.append(valid_phrases)
-            all_AR_mask.append(AR_mask)
+            all_document.append(document)
+            all_global_suffix_st_char.append(global_suffix_st_char)
 
         embeddings = []
         phrase_list = []
         emb_idx_map = {}
         emb_idx_list = []
-        suffix_list = []
         for instance_idx, valid_phrases in enumerate(all_valid_phrases):
-            suffix_list_ = ['' for _ in range(len(all_gpt_ids[instance_idx]))]
-            for phrase, start_idx, end_idx, ref_pos, suffix in valid_phrases:
+            for phrase, start_idx, end_idx, ref_pos in valid_phrases:
                 emb_idx_map[(instance_idx, phrase, start_idx, end_idx)] = len(emb_idx_list)
                 emb_idx_list.append(ref_pos)
                 phrase_list.append(phrase)
-                suffix_list_[start_idx] = suffix
-            suffix_list.append(suffix_list_)
         if emb_idx_list:
-            embeddings = torch.from_numpy(phrase_embedding[emb_idx_list])
+            embeddings = torch.from_numpy(self.phrase_embedding[emb_idx_list])
         else:
             embeddings = None
         # print(embeddings.shape) # torch.Size([19806, 128])
         
         batch_size = 4
         topk = 20
+        max_suffix_length = 72
         embeddings = embeddings.cuda()
         tok_reps = self.token_embeddings
         if self.dim_proj is not None:
@@ -228,11 +218,9 @@ class CopyisallyouneedPrefixOnly(nn.Module):
         for batch_st in tqdm(range(0, len(all_gpt_ids), batch_size), disable=quiet):
             batch_end = min(batch_st + batch_size, len(all_gpt_ids))
             ids_cpu = all_gpt_ids[batch_st: batch_end]
-            AR_mask = all_AR_mask[batch_st: batch_end]
             batch_valid_phrases = all_valid_phrases[batch_st: batch_end]
 
             ids_cpu = pad_sequence([torch.LongTensor(x) for x in ids_cpu], padding_value=self.tokenizer.eos_token_id, batch_first=True)
-            AR_mask = pad_sequence([torch.LongTensor(x) for x in AR_mask], padding_value=self.tokenizer.eos_token_id, batch_first=True)
             gpt2_mask = generate_mask(ids_cpu, pad_token_idx=self.tokenizer.eos_token_id)
             phrase_label = deepcopy(ids_cpu)
             seq_len = ids_cpu.shape[1]
@@ -242,13 +230,12 @@ class CopyisallyouneedPrefixOnly(nn.Module):
                     emb_idx = emb_idx_map[(instance_idx, phrase, start_idx, end_idx)]
                     phrase_label[local_idx][start_idx] = len(self.tokenizer) + emb_idx
             ids = ids_cpu.cuda()
-            AR_mask = AR_mask.cuda()
             gpt2_mask = gpt2_mask.cuda()
             gpt_reps = \
             self.model(input_ids=ids, attention_mask=gpt2_mask, output_hidden_states=True).hidden_states[-1]
             if self.dim_proj is not None:
                 gpt_reps = self.dim_proj(gpt_reps)
-            AR_loss, acc = self.get_token_loss(ids, gpt_reps, AR_mask, tok_reps, do_eval=True)
+            AR_loss, acc = self.get_token_loss(ids, gpt_reps, gpt2_mask, tok_reps, do_eval=True)
             logits_ = torch.matmul(gpt_reps, candidate_reps.t())
             topk_logits, topk_indexs = torch.topk(logits_, k=topk, dim=-1)
             topk_indexs = topk_indexs.cpu()
@@ -256,8 +243,10 @@ class CopyisallyouneedPrefixOnly(nn.Module):
             all_result = collections.defaultdict(int)
             k_list = [0, 1, 3, 5, 10, 20, 100]
             for instance_idx in range(len(topk_indexs)):
-                tokens, topk_pred, label, suffix = ids_cpu[instance_idx][1:].tolist(), topk_indexs[instance_idx][:-1].tolist(), phrase_label[instance_idx][1:].tolist(), suffix_list[instance_idx][1:]
-                for tok_idx, (tok_, topk_pred_, label_, suffix_) in enumerate(zip(tokens, topk_pred, label, suffix)):
+                tokens, topk_pred, label = ids_cpu[instance_idx][1:].tolist(), topk_indexs[instance_idx][:-1].tolist(), phrase_label[instance_idx][1:].tolist()
+                document = all_document[instance_idx]
+                suffix_st_char_list = all_global_suffix_st_char[instance_idx][1:]
+                for tok_idx, (tok_, topk_pred_, label_, suffix_st_char_) in enumerate(zip(tokens, topk_pred, label, suffix_st_char_list)):
                     # print(tok_, topk_pred_, label_, suffix_, self.tokenizer.decode(tok_))
                     if label_ < self.vocab_size: # token
                         tok_counter += 1
@@ -267,6 +256,7 @@ class CopyisallyouneedPrefixOnly(nn.Module):
                                 for later_end in range(k_idx + 1, len(k_list)):
                                     all_result[f'token_hit@{k_list[later_end]}'] += 1
                                     all_result[f'global_acc@{k_list[later_end]}'] += 1
+                                    all_result[f'global_hit@{k_list[later_end]}'] += 1
                                 break
                     else:
                         phrase_counter += 1
@@ -276,30 +266,29 @@ class CopyisallyouneedPrefixOnly(nn.Module):
                             if label_ in topk_pred_[st: end]:
                                 for later_end in range(k_idx + 1, len(k_list)):
                                     all_result[f'phrase_hit@{k_list[later_end]}'] += 1
+                                    all_result[f'global_hit@{k_list[later_end]}'] += 1
                                 break
-                        if not suffix:
-                            suffix_ = self.tokenizer.decode(tokens[tok_idx:tok_idx+72]) + ' '
-                        else:
-                            suffix_ += ' '
+                        suffix_ = document[suffix_st_char_: suffix_st_char_ + max_suffix_length].lstrip() + ' '
                         # print(suffix_)
 
                         # target_phrase = phrase_list[label_ - self.vocab_size]
                         # # print('target_phrase:', target_phrase)
 
                         # recall & acc
-                        valid_counter = 0
+                        # valid_counter = 0
                         for idx in range(topk):
                             pred_idx_ = topk_pred_[idx]
                             if (pred_idx_ >= self.vocab_size and suffix_.startswith(phrase_list[pred_idx_ - self.vocab_size] + ' ')) \
                                 or (pred_idx_ < self.vocab_size and pred_idx_ == tok_):
                                 # pred_phrase_ = phrase_list[pred_idx_ - self.vocab_size]
                                 # print('pred_phrase_:', pred_phrase_)
-                                valid_counter += 1
-                                if valid_counter == 1:
-                                    for tmp in range(idx, topk):
-                                        if tmp + 1 in k_list[1:]: 
-                                            all_result[f'phrase_acc@{tmp + 1}'] += 1
-                                            all_result[f'global_acc@{tmp + 1}'] += 1
+                                # valid_counter += 1
+                                # if valid_counter == 1:
+                                for tmp in range(idx, topk):
+                                    if tmp + 1 in k_list[1:]: 
+                                        all_result[f'phrase_acc@{tmp + 1}'] += 1
+                                        all_result[f'global_acc@{tmp + 1}'] += 1
+                                break
                             # Recall     
                             # if idx + 1 in k_list[1:]:
                             #     all_result[f'phrase_recall@{idx + 1}'] += valid_counter

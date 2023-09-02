@@ -38,8 +38,10 @@ class Agent:
             for k, v in all_result.items():
                 if 'token' in k:
                     fLog.write('%s: %.4f\n' % (k, v / tok_counter))
-                else:
+                elif 'phrase' in k:
                     fLog.write('%s: %.4f\n' % (k, v / phrase_counter))
+                elif 'global' in k:
+                    fLog.write('%s: %.4f\n' % (k, v / (tok_counter + phrase_counter)))
 
     def set_optimizer_scheduler_ddp(self):
         self.optimizer = transformers.AdamW(

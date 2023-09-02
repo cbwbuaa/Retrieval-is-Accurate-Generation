@@ -6,10 +6,14 @@ phrase_encoder_model:
     en: /apdcephfs/share_916081/ponybwcao/PLM/bert-base-cased
 prefix_encoder_tokenizer: 
     zh: 123
-    en: /apdcephfs/share_916081/ponybwcao/PLM/GPT2-small
+    en: 
+        small: /apdcephfs/share_916081/ponybwcao/PLM/GPT2-small
+        medium: /apdcephfs/share_916081/ponybwcao/PLM/GPT2-medium
 prefix_encoder_model: 
     zh: 123
-    en: /apdcephfs/share_916081/ponybwcao/PLM/GPT2-small
+    en: 
+        small: /apdcephfs/share_916081/ponybwcao/PLM/GPT2-small
+        medium: /apdcephfs/share_916081/ponybwcao/PLM/GPT2-medium
 
 # pretrain configuration
 pretrain:
@@ -36,7 +40,6 @@ train:
     # lr: 5e-4 # 5e-5
     grad_clip: 1.0
     seed: 0
-    batch_size: 4
     max_len: 1024
     # max_doc_size: 32
     buffer_size: 10000
