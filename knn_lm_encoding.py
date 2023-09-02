@@ -6,7 +6,7 @@ import torch
 import time
 import pickle
 from tqdm import tqdm
-import json
+import json, gc
 import numpy as np
 from torch.nn.utils.rnn import pad_sequence
 
@@ -34,7 +34,7 @@ def gpt_encoding(args):
         batch_size = args['batch_size']
         data = []
         embeddings, tokens = [], []
-        chunk_size = 2000000
+        chunk_size = 500000
         inner_idx = 0
         with open(args['data_path'].format(args['worker_idx'])) as f:
             for line in tqdm(f, disable=args['local_rank']!=0):
@@ -51,12 +51,16 @@ def gpt_encoding(args):
                         embeddings.append(embed)
                         tokens.extend(toks)
                         if len(tokens) >= chunk_size:
-                            print(f'Dump into chunk{inner_idx}')
+                            if args['local_rank'] == 0:
+                                print(f'Dump into chunk{inner_idx}')
                             np.save(f"{args['output_dir']}/{args['model_size']}/emb_{args['worker_idx']}_{inner_idx}.npy", np.vstack(embeddings))
                             np.save(f"{args['output_dir']}/{args['model_size']}/tok_{args['worker_idx']}_{inner_idx}.npy", np.array(tokens, dtype=np.int32))
                             inner_idx += 1
                             embeddings = []
                             tokens = []
+                            gc.collect()
+                            torch.cuda.empty_cache()
+
             if len(tokens) > 0:
                 if args['local_rank'] == 0:
                     print(f'Dump into chunk{inner_idx}')

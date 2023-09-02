@@ -49,8 +49,10 @@ class CopyisallyouneedPrefixOnly(Dataset):
             self.current_file_index = 0 if self.current_file_index == len(self.file_lists) - 1 else self.current_file_index + 1
             self.current_file_handler = open(self.file_lists[self.current_file_index], 'r')
             self.cache += load_lines_chunk(self.current_file_handler, self.buffer_size - len(self.cache))
-            with open(f'{self.args["log_dir"]}/{self.args["mode"]}/{self.args["version"]}.error', 'a') as f:
-                f.write(f'\n{self.args["local_rank"]} finish epoch.\n')
+            if self.args['local_rank'] == 0:
+                print(f'\n{self.args["local_rank"]} finish epoch.\n')
+            # with open(f'{self.args["log_dir"]}/{self.args["mode"]}/{self.args["version"]}.error', 'a') as f:
+            #     f.write(f'\n{self.args["local_rank"]} finish epoch.\n')
         # self.cache = [json.loads(x) for x in self.cache]
         random.shuffle(self.cache)
 
@@ -166,6 +168,8 @@ class CopyisallyouneedPrefixOnly(Dataset):
             global_suffix_st_char = all_global_suffix_st_char[instance_idx]
             for tok_idx in range(len(global_suffix_st_char)):
                 suffix_st_char = global_suffix_st_char[tok_idx]
+                if suffix_st_char == -1: # inner token
+                    continue
                 suffix_ = document[suffix_st_char: suffix_st_char + max_suffix_length].lstrip() + ' '
                 for can_idx, candidate in enumerate(phrase_list):
                     if suffix_.startswith(candidate + ' '):

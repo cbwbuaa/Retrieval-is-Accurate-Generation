@@ -66,6 +66,7 @@ CUDA_VISIBLE_DEVICES=$cuda python3.8 -m torch.distributed.launch --nproc_per_nod
     --lr $lr \
     --phrase_dim $phrase_dim \
     --model_size $model_size \
-    --batch_size $batch_size
+    --batch_size $batch_size \
+    --resume true
     #--random_initialize true #> $root_dir/log/train_pipeline/${version}.error 2>&1 &
     # --pretrain_model_path $pretrain_model_path \

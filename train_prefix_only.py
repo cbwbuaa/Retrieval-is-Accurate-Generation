@@ -83,10 +83,10 @@ def main(**args):
     pbar = None
     current_step, over_train_flag = 0, False
     # sampler.set_epoch(0)    # shuffle for DDP
-    # if agent.load_last_step:
-    #     current_step = agent.load_last_step + 1
-    #     if args['global_rank'] == 0:
-    #         print(f'[!] load latest step: {current_step}')
+    if agent.load_last_step:
+        current_step = agent.load_last_step + 1
+        if args['global_rank'] == 0:
+            print(f'[!] load latest step: {current_step}')
     if args['local_rank'] == 0:
         print('[!] model process:', os.getpid())
     training_st_time = time()

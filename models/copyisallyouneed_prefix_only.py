@@ -43,8 +43,9 @@ class CopyisallyouneedPrefixOnly(nn.Module):
 
     @torch.no_grad()
     def get_query_rep(self, ids):
-        self.eval()
         output = self.model(input_ids=ids, output_hidden_states=True)['hidden_states'][-1][:, -1, :]
+        if self.dim_proj:
+            output = self.dim_proj(output)
         return output
 
     def get_token_loss(self, ids, hs, mask, token_reps, do_eval=True):
@@ -259,6 +260,8 @@ class CopyisallyouneedPrefixOnly(nn.Module):
                                     all_result[f'global_hit@{k_list[later_end]}'] += 1
                                 break
                     else:
+                        if suffix_st_char_ == -1:
+                            continue
                         phrase_counter += 1
                         # hit
                         for k_idx in range(len(k_list) - 1):

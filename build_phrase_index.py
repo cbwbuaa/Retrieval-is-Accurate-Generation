@@ -6,12 +6,12 @@ import sys, collections, random, math
 import numpy as np
 import faiss
 from time import time
-sys.path.append('/apdcephfs/share_916081/shared_info/ponybwcao/phrase_extraction/training')
-from tokenizer import Tokenizer
-from utils import *
+# sys.path.append('/apdcephfs/share_916081/shared_info/ponybwcao/phrase_extraction/training')
+# from tokenizer import Tokenizer
+# from utils import *
 import faiss.contrib.torch_utils
 from copy import deepcopy
-from nltk import word_tokenize
+# from nltk import word_tokenize
 
 
 def load_emb(path='embeddings.pkl'):
@@ -28,7 +28,8 @@ def parser_args():
     parser.add_argument('--dataset', default='wikitext103', type=str)
     parser.add_argument('--model', type=str, default='copyisallyouneed')
     parser.add_argument('--training_data_dir', type=str, default='/apdcephfs/share_916081/shared_info/ponybwcao/data/8split_all_phrase_ref_check_valid')
-    parser.add_argument('--model_name', type=str, default='best_0601_shuffle_queue5k_mergedQ_eval1k_dim128_focal_loss_lr1e-4_prebatch0_beta0.5_warmup50000_prenum0_temp2.0_400000')
+    parser.add_argument('--model_name', type=str, default=None)
+    parser.add_argument('--model_size', type=str, default='small')
     parser.add_argument('--decoding_method', type=str, default='nucleus_sampling')
     parser.add_argument('--local_rank', type=int)
     parser.add_argument('--device_num', type=int)
@@ -191,7 +192,7 @@ def build_index():
         # res.setTempMemory(tempmem)
         gpu_resources.append(res)
     vres = faiss.GpuResourcesVector()
-    vdev = faiss.IntVector()
+    vdev = faiss.Int32Vector()
     for i in range(ngpu):
         vdev.push_back(i)
         vres.push_back(gpu_resources[i])
@@ -206,18 +207,23 @@ def generation(**args):
     config = load_config(args)
     args.update(config)
     agent = load_model(args)
-    agent.load_model(f'/apdcephfs/share_916081/shared_info/ponybwcao/Copyisallyouneed/ckpt/wikitext103/copyisallyouneed/queryside/best_prebatch_neg0_pretrain40w_100w_20000.pt')
+    agent.load_model(f'/apdcephfs/share_916081/shared_info/ponybwcao/Copyisallyouneed/ckpt/wikipedia/copyisallyouneed/train/best_0901_small_bs4_temp2.0_focal_lr1e-4_100000.pt')
+    # agent.load_model(f'/apdcephfs/share_916081/shared_info/ponybwcao/Copyisallyouneed/ckpt/wikipedia/copyisallyouneed/train/best_0901_medium_bs2_temp2.0_focal_lr1e-4_150000.pt')
     # agent.load_model(f'{args["root_dir"]}/ckpt/wikitext103/copyisallyouneed/train/{args["model_name"]}.pt')
+    agent.model.eval()
     print(f'[!] init model over')
 
     phrase_list = load_emb('/apdcephfs/share_916081/ponybwcao/phrase_extraction/data/wikipedia/phrase_embedding_index/PCA_phrase_merged.pkl')
-    # phrase_list += token_list
 
+    token_embs = agent.model.dim_proj(agent.model.token_embeddings).cpu().detach()
+    # phrase_embedding = np.load('/apdcephfs/share_916081/ponybwcao/phrase_extraction/data/wikipedia/phrase_embedding_index/PCA_emb_merged.npy')
+    # phrase_embedding = torch.from_numpy(phrase_embedding)
     retriever = build_index()
-    embedding = np.memmap('/apdcephfs/share_916081/ponybwcao/phrase_extraction/data/wikipedia/phrase_embedding_index/PCA_emb_merged.npy', dtype=np.float32, mode='r', shape=(138543105, 128))
-    retriever.add(embedding)
+    retriever.add(token_embs)
+    # retriever.add(torch.vstack([token_embs, phrase_embedding]))
     print(f'[!] init retriever over')
 
+    prefix_length = 128
     collection = []
     with open(f'/apdcephfs/share_916081/ponybwcao/phrase_extraction/data/minipile/raw/test.jsonl') as f:
         # collect the valid prefixes
@@ -225,151 +231,20 @@ def generation(**args):
         for line in tqdm(f.readlines()):
             line = json.loads(line)['text']
             ids = agent.model.tokenizer.encode(line, add_special_tokens=False)
-            prefix, reference = ids[:32], ids[32:]
-            if len(prefix) == 32:
+            prefix, reference = ids[:prefix_length], ids[prefix_length:]
+            if len(prefix) == prefix_length:
                 prefix = agent.model.tokenizer.decode(prefix)
                 reference = agent.model.tokenizer.decode(reference)
                 texts.append((prefix, reference))
+                break
         print(f'[!] collect {len(texts)} valid samples which have at least 32 tokens in prefix')
         t1 = time()
         for prefix, reference in tqdm(texts):
             text, candidates, time_cost = agent.retrieve_one_phrase(prefix, retriever, phrase_list, decoding_method=args["decoding_method"], top_k=0, top_p=0.95, temp=1., get_time_cost=True)
-            # print(prefix)
-            # print(text)
-            # print(candidates)
-            # print(time_cost)
-            # exit()
-            collection.append({
-                'prefix': prefix, 
-                'reference': reference, 
-                'text': text, 
-                'phrases': candidates,
-                'time_cost': time_cost
-            })
-    return collection
-
-def generation_from_gt_docs(**args):
-    args['mode'] = 'test'
-    config = load_config(args)
-    args.update(config)
-    agent = load_model(args)
-    agent.load_model(f'{args["root_dir"]}/ckpt/wikitext103/copyisallyouneed/train/{args["model_name"]}.pt')
-    print(f'[!] init model over')
-
-    # phrases_data = load_tokenization_results()
-    base_data = load_base_data_dict('/apdcephfs/share_916081/shared_info/ponybwcao/Copyisallyouneed/data/wikitext103_1024/base_data_128.txt')
-    input_data = []
-    data_num = 5000
-    with open('/apdcephfs/share_916081/shared_info/ponybwcao/data/8split_all_phrase_ref/tokenization_result_0.jsonl') as f:
-        for line in f:
-            input_data.append(json.loads(line.strip()))
-            if len(input_data) >= data_num:
-                break
-
-    collection = []
-    for data in tqdm(input_data):
-        phrases = data['results']
-        prefix = []
-        candidate_doc = []
-        for idx in range(len(phrases)):
-            if len(prefix) > 0:
-                phrase = ' ' + phrases[idx][0]
-            else:
-                phrase = phrases[idx][0]
-            prefix.extend(agent.model.tokenizer.encode(phrase, add_special_tokens=False))
-            if len(prefix) >= 32 and idx < len(phrases) - 1:
-                candidate_doc = list(set([ref[0] for phrase, ref in phrases[idx+1:] if ref]))
-                reference = ' ' + ' '.join([phrase for phrase, ref in phrases[idx+1:]])
-                break
-
-        if not candidate_doc:
-            continue
-        prefix = agent.model.tokenizer.decode(prefix)
-        candidate_docs = [base_data[x] for x in candidate_doc]
-
-        text, candidates, time_cost = agent.generate_test(prefix, candidate_docs, decoding_method=args["decoding_method"], top_k=0, top_p=0.95, temp=1., get_time_cost=True)
-
-        collection.append({
-            'prefix': prefix, 
-            'reference': reference, 
-            'text': text, 
-            'phrases': candidates,
-            'time_cost': time_cost
-        })
-    return collection
-
-def generation_from_candidate_docs(**args):
-
-    def load_base_data_dict(path, quiet=False):
-        base_data = {}
-        with open(path, 'r') as f:
-            for line in tqdm(f.readlines(), desc=
-            'Loading corpus', disable=quiet):
-                line = line.strip().split('\t')
-                chunk = ' '.join(line[:-1])
-                id_label = line[-1].strip()
-                if id_label:
-                    base_data[id_label] = chunk
-        return base_data
-
-    def load_tokenization_results_dict():
-        phrases_data = {}
-        for i in range(8):
-            with open(f'/apdcephfs/share_916081/shared_info/ponybwcao/data/8split_0neg/pretrain_data_{i}.jsonl', 'r') as f:
-                for line in f:
-                    data = json.loads(line.strip())
-                    phrases_data[data['index']] = data['results'][0]
-        print('Load phrases done.')
-        return phrases_data
-    
-    def load_tokenization_results():
-        phrases_data = []
-        for i in range(8):
-            with open(f'/apdcephfs/share_916081/shared_info/ponybwcao/data/8split_0neg/pretrain_data_{i}.jsonl', 'r') as f:
-                for line in f:
-                    data = json.loads(line.strip())
-                    phrases_data.append(data['results'][0])
-        print('Load phrases done.')
-        return phrases_data
-
-    args['mode'] = 'test'
-    config = load_config(args)
-    args.update(config)
-    agent = load_model(args)
-    agent.load_model(f'{args["root_dir"]}/ckpt/wikitext103/copyisallyouneed/train/{args["model_name"]}.pt')
-    print(f'[!] init model over')
-
-    base_data, _ = load_base_data('../data/wikitext103_1024/base_data_128.txt')
-    # phrases_data = load_tokenization_results()
-    phrase2doc_map = load_emb('/apdcephfs/share_916081/shared_info/ponybwcao/phrase_extraction/data/wikitext103/wiki103_merged_phrase_map.pkl')
-    print('[!] Load phrase2doc map over')
-
-    # retriever = Retriever(f'../data/wikitext103_1024/base_data_128.txt', 200, f'../data/dpr_wikitext103_1024', 0)
-
-    # vocab
-    vocab_path = '/apdcephfs/share_916081/ponybwcao/phrase_extraction/retrieve_doc/vocabulary/wiki103_merged.vocab'
-    tokenizer = Tokenizer(vocab_path, mode='word_end_v2', lower_case=False, load_dict=False, tree=True, tree_mode='word')
-    # query_list = tokenizer.search_candidates(query, phrase=True, return_list=True)
-
-    collection = []
-    with open(f'../data/wikitext103_1024/test.txt') as f:
-        # collect the valid prefixes
-        texts = []
-        for line in tqdm(f.readlines()):
-            ids = agent.model.tokenizer.encode(line, add_special_tokens=False)
-            prefix, reference = ids[:32], ids[32:]
-            if len(prefix) == 32:
-                prefix = agent.model.tokenizer.decode(prefix)
-                reference = agent.model.tokenizer.decode(reference)
-                texts.append((prefix, reference))
-        print(f'[!] collect {len(texts)} valid samples which have at least 32 tokens in prefix')
-        t1 = time()
-        for prefix, reference in tqdm(texts):
-            candidate_list = tokenizer.search_candidates(prefix, phrase=True, return_list=True)
-            candidate_list = [x[0] for x in candidate_list]
-            print(candidate_list)
-            text, candidates, time_cost = agent.generate_from_candidate_docs(prefix, candidate_list, base_data, phrase2doc_map, max_doc_num=args['doc_topk'], decoding_method=args["decoding_method"], top_k=0, top_p=0.95, temp=1., get_time_cost=True)
             print(prefix)
+            print('-'*30)
+            print(reference)
+            print('-'*30)
             print(text)
             print(candidates)
             print(time_cost)
@@ -1053,52 +928,35 @@ def OBQA_test_gpt2(**args):
     print(sum(results) / len(results))
 
 def regenerate_ref_retrieve(**args):
-    # model
     args['mode'] = 'test'
-    args['prefix_only'] = True
     config = load_config(args)
     args.update(config)
     agent = load_model(args)
-    agent.load_model(f'/apdcephfs/share_916081/shared_info/ponybwcao/Copyisallyouneed/ckpt/wikitext103/copyisallyouneed/train_pipeline/{args["model_name"]}.pt')
+    agent.load_model(f'/apdcephfs/share_916081/shared_info/ponybwcao/Copyisallyouneed/ckpt/wikipedia/copyisallyouneed/train/best_0901_small_bs4_temp2.0_focal_lr1e-4_100000.pt')
+    # agent.load_model(f'/apdcephfs/share_916081/shared_info/ponybwcao/Copyisallyouneed/ckpt/wikipedia/copyisallyouneed/train/best_0901_medium_bs2_temp2.0_focal_lr1e-4_150000.pt')
+    # agent.load_model(f'{args["root_dir"]}/ckpt/wikitext103/copyisallyouneed/train/{args["model_name"]}.pt')
+    agent.model.eval()
     print(f'[!] init model over')
-    # build index
-    emb_dir = f'/apdcephfs/share_916081/shared_info/ponybwcao/Copyisallyouneed/phrase_index/{args["model_name"]}'
-    phrase_emb = np.load(f'{emb_dir}/phrase_emb.npy')
-    index_phrase_pos = load_emb(f'{emb_dir}/text_idx_list.pkl')
-    index_phrase = index_phrase_pos['phrase']
-    index_pos = index_phrase_pos['idx']
 
-    co = faiss.GpuMultipleClonerOptions()
-    co.shard = True
-    index = faiss.IndexFlatIP(phrase_emb.shape[1])
-    vres = faiss.GpuResourcesVector()
-    vdev = faiss.Int32Vector()
-    ngpu = faiss.get_num_gpus()
-    gpu_list = list(range(1, ngpu))
-    tempmem = -1 # 16 * 1024 ** 3 # use N bytes of temporary GPU memory
-    gpu_resources = []
-    for i in gpu_list:
-        res = faiss.StandardGpuResources()
-        if tempmem >= 0:
-            res.setTempMemory(tempmem)
-        gpu_resources.append(res)
-    for i in range(len(gpu_list)):
-        vdev.push_back(gpu_list[i])
-        vres.push_back(gpu_resources[i])
-    index = faiss.index_cpu_to_gpu_multiple(vres, vdev, index, co)
-    # index = faiss.index_cpu_to_gpu(faiss.StandardGpuResources(), 0, index)
-    index.add(phrase_emb)
-    print(f'[!] init index over')
+    phrase_list = load_emb('/apdcephfs/share_916081/ponybwcao/phrase_extraction/data/wikipedia/phrase_embedding_index/PCA_phrase_merged.pkl')
+
+    token_embs = agent.model.dim_proj(agent.model.token_embeddings).cpu().detach()
+    # phrase_embedding = np.load('/apdcephfs/share_916081/ponybwcao/phrase_extraction/data/wikipedia/phrase_embedding_index/PCA_emb_merged.npy')
+    # phrase_embedding = torch.from_numpy(phrase_embedding)
+    retriever = build_index()
+    retriever.add(token_embs)
+    # retriever.add(torch.vstack([token_embs, phrase_embedding]))
+    print(f'[!] init retriever over')
+
     # processing
     chunk_size = 1000
     batch_size = 64
     topk = 256
     prev_time = time()
     for data_idx in tqdm(range(args["start"], args["end"])):
-        data_f = open(f'/apdcephfs/share_916081/shared_info/ponybwcao/data/8split_all_phrase_ref_check_valid_merged/train/tmp.jsonl')
-        # data_f = open(f'/apdcephfs/share_916081/shared_info/ponybwcao/data/8split_all_phrase_ref_check_valid_merged/train/train_{data_idx}.jsonl')
-        # output_f = open(f'/apdcephfs/share_916081/shared_info/ponybwcao/data/8split_all_phrase_ref_check_valid_merged/train_EM1/train_{data_idx}.jsonl', 'w')
-        output_f = open(f'/apdcephfs/share_916081/shared_info/ponybwcao/data/8split_all_phrase_ref_check_valid_merged/train_EM1/tmp.jsonl', 'w')
+        data_f = open(f'/apdcephfs/share_916081/shared_info/ponybwcao/data/8split_all_phrase_ref_check_valid_merged/train/train_{data_idx}.jsonl')
+        output_f = open(f'/apdcephfs/share_916081/shared_info/ponybwcao/data/8split_all_phrase_ref_check_valid_merged/train_EM1/train_{data_idx}.jsonl', 'w')
+        
         find_num = 0
         have_label_num = 0
         total_num = 0
@@ -1665,9 +1523,8 @@ if __name__ == "__main__":
             json.dump(result, f, indent=4, ensure_ascii=False)
     elif args['mode'] == 'generation':
         result = generation(**args)
-        with open(f'/apdcephfs/share_916081/shared_info/ponybwcao/Copyisallyouneed/raw_files/random_runs_en_wiki_testset/{args["dataset"]}_copy_queryside_{args["decoding_method"]}_best_prebatch_neg0_pretrain40w_100w_20000.json', 'w') as f:
-        # with open(f'/apdcephfs/share_916081/shared_info/ponybwcao/Copyisallyouneed/raw_files/random_runs_en_wiki_testset/{args["dataset"]}_copy_quey_{args["decoding_method"]}_{args["model_name"]}.json', 'w') as f:
-            json.dump(result, f, indent=4, ensure_ascii=False)
+        # with open(f'/apdcephfs/share_916081/shared_info/ponybwcao/Copyisallyouneed/raw_files/random_runs_en_wiki_testset/{args["dataset"]}_copy_queryside_{args["decoding_method"]}_best_prebatch_neg0_pretrain40w_100w_20000.json', 'w') as f:
+        #     json.dump(result, f, indent=4, ensure_ascii=False)
     elif args['mode'] == 'generation_gt':
         result = generation_from_gt_docs(**args)
         with open(f'/apdcephfs/share_916081/shared_info/ponybwcao/Copyisallyouneed/raw_files/random_runs_en_wiki_testset/{args["dataset"]}_copy_queryside_{args["decoding_method"]}_best_prebatch_neg0_pretrain40w_100w_20000.json', 'w') as f:
