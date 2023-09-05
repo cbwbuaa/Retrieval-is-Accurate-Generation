@@ -12,7 +12,7 @@ class CopyisallyouneedPrefixOnly(Dataset):
         self.vocab = AutoTokenizer.from_pretrained(args['prefix_encoder_tokenizer'][args['lang']][self.args['model_size']])
 
         self.data_root_path = args['data_root_dir']
-        self.phrase_embedding = np.memmap('/apdcephfs/share_916081/ponybwcao/phrase_extraction/data/wikipedia/phrase_embedding_index/PCA_emb_merged.npy', dtype=np.float32, mode='r', shape=(138543105, 128))
+        self.phrase_embedding = np.memmap('/apdcephfs/share_916081/ponybwcao/phrase_extraction/data/wikipedia/phrase_embedding_index/PCA_emb_merged.npy', dtype=np.float32, mode='r', shape=(137101097, 128))
         self.file_lists = [f'{args["training_data_dir"]}/train_chunk{args["local_rank"]}_tok_{args["model_size"]}']
         if args['local_rank'] == 0:
             print(f'[!] file list for worker{self.args["local_rank"]}: {self.file_lists}')
@@ -25,6 +25,7 @@ class CopyisallyouneedPrefixOnly(Dataset):
         self.max_input_length = args['max_len']
         self.max_suffix_length = 128
         self.batch_size = args['batch_size']
+        self.phrase_table = load_emb('/apdcephfs/share_916081/ponybwcao/phrase_extraction/data/wikipedia/phrase_embedding_index/PCA_phrase_merged.pkl')
 
         self.cache = []
         # self.data_queue = []
@@ -122,33 +123,46 @@ class CopyisallyouneedPrefixOnly(Dataset):
         return all_gpt_ids, all_valid_phrases, all_AR_mask
 
     def load_one_batch(self):
-        all_gpt_ids, all_valid_phrases, all_document, all_global_suffix_st_char = [], [], [], []
+        all_gpt_ids, all_valid_phrases, all_document, all_global_suffix_st_char, all_hard_negs = [], [], [], [], []
         for _ in range(self.batch_size):
             if not self.cache:
                 self.load_one_part()
-            gpt_ids, valid_phrases, document, global_suffix_st_char = json.loads(self.cache.pop(0))
+            item = json.loads(self.cache.pop(0))
+            if len(item) == 4:
+                gpt_ids, valid_phrases, document, global_suffix_st_char = item
+                hard_negs = []
+            elif len(item) == 5:
+                gpt_ids, valid_phrases, document, global_suffix_st_char, hard_negs = item
             all_gpt_ids.append(gpt_ids)
             all_valid_phrases.append(valid_phrases)
             all_document.append(document)
             all_global_suffix_st_char.append(global_suffix_st_char)
-        return all_gpt_ids, all_valid_phrases, all_document, all_global_suffix_st_char
+            all_hard_negs.append(hard_negs)
+        return all_gpt_ids, all_valid_phrases, all_document, all_global_suffix_st_char, all_hard_negs
 
     def __getitem__(self, i):
         data_st_time = time()
         batch = self.load_one_batch()
-        all_gpt_ids, all_valid_phrases, all_document, all_global_suffix_st_char = batch
+        all_gpt_ids, all_valid_phrases, all_document, all_global_suffix_st_char, all_hard_negs = batch
 
         # load phrase embeddings
-        # keep the same phrases (relect popularities)
+        # keep the same phrases (reflect popularities)?
         embeddings = []
         phrase_list = []
         emb_idx_map = {}
         emb_idx_list = []
-        for instance_idx, valid_phrases in enumerate(all_valid_phrases):
+        for instance_idx in range(len(all_valid_phrases)):
+            valid_phrases, hard_negs = all_valid_phrases[instance_idx], all_hard_negs[instance_idx]
             for phrase, start_idx, end_idx, ref_pos in valid_phrases:
-                emb_idx_map[(instance_idx, phrase, start_idx, end_idx)] = len(emb_idx_list)
-                emb_idx_list.append(ref_pos)
-                phrase_list.append(phrase)
+                if ref_pos not in emb_idx_map:
+                    emb_idx_map[ref_pos] = len(emb_idx_list)
+                    emb_idx_list.append(ref_pos)
+                    phrase_list.append(phrase)
+            for neg_ref_pos in hard_negs:
+                if neg_ref_pos not in emb_idx_map:
+                    emb_idx_map[neg_ref_pos] = len(emb_idx_list)
+                    emb_idx_list.append(neg_ref_pos)
+                    phrase_list.append(self.phrase_table[neg_ref_pos])
         if emb_idx_list:
             embeddings = torch.from_numpy(self.phrase_embedding[emb_idx_list])
         else:

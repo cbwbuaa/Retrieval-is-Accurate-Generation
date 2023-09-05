@@ -34,6 +34,7 @@ def parser_args():
     parser.add_argument('--local_rank', type=int)
     parser.add_argument('--device_num', type=int)
     parser.add_argument('--device_idx', type=int)
+    parser.add_argument('--chunk_idx', type=int)
     parser.add_argument('--phrase_dim', type=int, default=128)
     parser.add_argument('--nworker', type=int)
     parser.add_argument('--cluster_idx', type=int)
@@ -184,8 +185,10 @@ def merge_result():
             global_idx_list.extend(text_idx['idx'])
     save_emb({'phrase': global_text_list, 'idx': global_idx_list}, f'{input_dir}/text_idx_list.pkl')
 
-def build_index():
+def build_index(gpu_list=None):
     ngpu = faiss.get_num_gpus()
+    if not gpu_list:
+        gpu_list = list(range(ngpu))
     gpu_resources = []
     for i in range(ngpu):
         res = faiss.StandardGpuResources()
@@ -193,9 +196,9 @@ def build_index():
         gpu_resources.append(res)
     vres = faiss.GpuResourcesVector()
     vdev = faiss.Int32Vector()
-    for i in range(ngpu):
-        vdev.push_back(i)
-        vres.push_back(gpu_resources[i])
+    for i, gpu_idx in enumerate(gpu_list):
+        vdev.push_back(gpu_idx)
+        vres.push_back(gpu_resources[gpu_idx])
     co = faiss.GpuMultipleClonerOptions()
     co.shard = True
     index = faiss.index_cpu_to_gpu_multiple(
@@ -927,180 +930,133 @@ def OBQA_test_gpt2(**args):
         results.append(gt == pred)
     print(sum(results) / len(results))
 
+@torch.no_grad()
 def regenerate_ref_retrieve(**args):
+    def process_batch(all_gpt_ids, all_document, all_global_suffix_st_char, all_length):
+        total_tok_cnt_, match_phrase_cnt_ = 0, 0
+        gpt_ids = pad_sequence([torch.LongTensor(x) for x in all_gpt_ids], padding_value=tokenizer.eos_token_id, batch_first=True)
+        # gpt2_mask = generate_mask(gpt_ids, pad_token_idx=tokenizer.eos_token_id)
+        gpt2_mask = pad_sequence([torch.ones(len(x)).to(torch.long) for x in all_gpt_ids], padding_value=0, batch_first=True)
+        gpt_reps = model(input_ids=gpt_ids.cuda(), attention_mask=gpt2_mask.cuda(), output_hidden_states=True).hidden_states[-1]
+        
+        gpt2_mask = gpt2_mask[:, 1:].reshape(-1).to(torch.bool)
+        gpt_reps = gpt_reps[:, :-1, :].reshape(-1, gpt_reps.shape[-1])
+        if dim_proj is not None:
+            gpt_reps = dim_proj(gpt_reps).cpu()
+        gpt_reps = gpt_reps[gpt2_mask]
+        assert sum(all_length) - len(all_length) == gpt_reps.shape[0], print(sum(all_length) - len(all_length), gpt_reps.shape[0])
+        D, I = retriever.search(gpt_reps, topk)
+        cur_idx = 0
+        all_hard_negs = []
+        all_valid_phrases = []
+        for instance_idx, length in enumerate(all_length):
+            st_idx = cur_idx
+            end_idx = st_idx + length - 1
+            document = all_document[instance_idx]
+            global_suffix_st_char = all_global_suffix_st_char[instance_idx][1:]
+            assert len(global_suffix_st_char) == length - 1
+            valid_phrases = []
+            hard_negs = [[]]
+            for tok_idx in range(st_idx, end_idx):
+                topk_pred = I[tok_idx].tolist()
+                suffix_st_char = global_suffix_st_char[tok_idx - st_idx]
+                if suffix_st_char != -1:
+                    total_tok_cnt_ += 1
+                    suffix_ = document[suffix_st_char: suffix_st_char + max_suffix_length].lstrip() + ' '
+                    for candidate_idx in topk_pred:
+                        cand_phrase_ = phrase_list[candidate_idx]
+                        if suffix_.startswith(cand_phrase_ + ' '):
+                            valid_phrases.append([cand_phrase_, tok_idx - st_idx + 1, -1, candidate_idx])
+                            match_phrase_cnt_ += 1
+                            break
+                hard_negs.append([candidate_idx for candidate_idx in topk_pred])
+                # hard_negs.append([(candidate_idx, phrase_list[candidate_idx]) for candidate_idx in topk_pred])
+            all_valid_phrases.append(valid_phrases)
+            all_hard_negs.append(hard_negs)
+            cur_idx += length - 1
+        return all_valid_phrases, all_hard_negs, total_tok_cnt_, match_phrase_cnt_
+
+    def merge_valid_phrases(ori_valid_phrases, new_valid_phrases): # new phrase has higher priority
+        assert len(ori_valid_phrases) == len(new_valid_phrases)
+        merged_valid_phrases = []
+        for ori_list, new_list in zip(ori_valid_phrases, new_valid_phrases):
+            cache_st_idx = {x[1]: 1 for x in new_list}
+            merged_list = new_list
+            for x in ori_list:
+                phrase, st, end, ref = x
+                if st not in cache_st_idx:
+                    merged_list.append(x)
+                    cache_st_idx[st] = 1
+            merged_valid_phrases.append(merged_list)
+        return merged_valid_phrases
+
     args['mode'] = 'test'
     config = load_config(args)
     args.update(config)
     agent = load_model(args)
-    agent.load_model(f'/apdcephfs/share_916081/shared_info/ponybwcao/Copyisallyouneed/ckpt/wikipedia/copyisallyouneed/train/best_0901_small_bs4_temp2.0_focal_lr1e-4_100000.pt')
-    # agent.load_model(f'/apdcephfs/share_916081/shared_info/ponybwcao/Copyisallyouneed/ckpt/wikipedia/copyisallyouneed/train/best_0901_medium_bs2_temp2.0_focal_lr1e-4_150000.pt')
-    # agent.load_model(f'{args["root_dir"]}/ckpt/wikitext103/copyisallyouneed/train/{args["model_name"]}.pt')
+    if args['model_size'] == 'small':
+        agent.load_model(f'/apdcephfs/share_916081/shared_info/ponybwcao/Copyisallyouneed/ckpt/wikipedia/copyisallyouneed/train/best_0901_small_bs4_temp2.0_focal_lr1e-4_100000.pt')
+    elif args['model_size'] == 'medium':
+        agent.load_model(f'/apdcephfs/share_916081/shared_info/ponybwcao/Copyisallyouneed/ckpt/wikipedia/copyisallyouneed/train/best_0901_medium_bs2_temp2.0_focal_lr1e-4_150000.pt')
     agent.model.eval()
+    model = agent.model.model
+    tokenizer = agent.model.tokenizer
+    dim_proj = agent.model.dim_proj
     print(f'[!] init model over')
 
     phrase_list = load_emb('/apdcephfs/share_916081/ponybwcao/phrase_extraction/data/wikipedia/phrase_embedding_index/PCA_phrase_merged.pkl')
 
-    token_embs = agent.model.dim_proj(agent.model.token_embeddings).cpu().detach()
-    # phrase_embedding = np.load('/apdcephfs/share_916081/ponybwcao/phrase_extraction/data/wikipedia/phrase_embedding_index/PCA_emb_merged.npy')
-    # phrase_embedding = torch.from_numpy(phrase_embedding)
-    retriever = build_index()
-    retriever.add(token_embs)
-    # retriever.add(torch.vstack([token_embs, phrase_embedding]))
+    phrase_embedding = torch.from_numpy(np.load('/apdcephfs/share_916081/ponybwcao/phrase_extraction/data/wikipedia/phrase_embedding_index/PCA_emb_merged.npy'))
+    retriever = build_index([1, 2, 3])
+    retriever.add(phrase_embedding)
     print(f'[!] init retriever over')
 
     # processing
-    chunk_size = 1000
-    batch_size = 64
-    topk = 256
-    prev_time = time()
-    for data_idx in tqdm(range(args["start"], args["end"])):
-        data_f = open(f'/apdcephfs/share_916081/shared_info/ponybwcao/data/8split_all_phrase_ref_check_valid_merged/train/train_{data_idx}.jsonl')
-        output_f = open(f'/apdcephfs/share_916081/shared_info/ponybwcao/data/8split_all_phrase_ref_check_valid_merged/train_EM1/train_{data_idx}.jsonl', 'w')
-        
-        find_num = 0
-        have_label_num = 0
-        total_num = 0
-        new_label_num = 0
-        ori_label_num = 0
-        replace_num = 0
-        data = []
-        gpt_ids = []
-        all_phrases = []
-        all_ori_refs = []
-        all_index = []
-        all_st_idx = []
-        all_query = []
-        all_suffix_pos = []
-        all_query_doc_idx = []
-        counter = 0
-        stride = 256
+    batch_size = 52
+    topk = 128
+    max_suffix_length = 72
+    total_tok_cnt = 0
+    match_phrase_cnt = 0
+    merged_phrase_cnt = 0
+
+    chunk_idx = args['chunk_idx']
+    data_path = f'/apdcephfs/share_916081/ponybwcao/phrase_extraction/data/minipile/match_result_tok/train_chunk{chunk_idx}_tok_{args["model_size"]}'
+    output_path = f'/apdcephfs/share_916081/ponybwcao/phrase_extraction/data/minipile/match_result_tok/train_chunk{chunk_idx}_tok_{args["model_size"]}_EM'
+    done_num = sum([1 for _ in open(output_path)])
+    worker_cnt = 0
+    with open(data_path) as data_f, open(output_path, 'a') as output_f:
         results = collections.defaultdict(int)
-        k_list = [1, 16, 32, 64, 128, 256]
-        end_flag = False
-        while True:
-            if not data:
-                data = load_lines_chunk(data_f, chunk_size)
-                if not data:
-                    end_flag = True
-                else:
-                    if counter > 0:
-                        cur_time = time()
-                        print(f'{(cur_time - prev_time) // 60} min')
-                        prev_time = cur_time
-                        print(f'total: {total_num}, have_label: {have_label_num}, {round(have_label_num / total_num * 100, 2)}')
-                        print(f'find: {find_num}, replace: {replace_num}, new_label: {new_label_num}, ori_num: {ori_label_num}')
-                        for k, v in results.items():
-                            print(f'{k}: {round(v / total_num * 100, 2)}%')
-                    counter += chunk_size
-                    print(f'processing {data_idx}:{counter-chunk_size}-{counter}')
-            if not end_flag:
-                item = json.loads(data.pop(0))
-                phrase_refs, doc_index = item['results'], item['index']
-                phrases = [x[0] for x in phrase_refs]
-                ori_ref = [tuple(x[1]) for x in phrase_refs]
-                all_phrases.append(phrases)
-                all_ori_refs.append(ori_ref)
-                all_query_doc_idx.extend([doc_index] * len(phrases[1:]))
-                all_index.append(doc_index)
-                query = phrases[0]
-                for phrase in phrases[1:]:
-                    all_suffix_pos.append((len(all_query), len(query) + 1))
-                    query += ' ' + phrase
-                all_query.append(query)
+        all_gpt_ids, ori_valid_phrases, all_document, all_global_suffix_st_char, all_length = [], [], [], [], []
+        for line in tqdm(data_f):
+            worker_cnt += 1
+            if worker_cnt <= done_num:
+                continue
+            gpt_ids, valid_phrases, document, global_suffix_st_char = json.loads(line)
+            all_gpt_ids.append(gpt_ids)
+            ori_valid_phrases.append(valid_phrases)
+            all_length.append(len(gpt_ids))
+            all_document.append(document)
+            all_global_suffix_st_char.append(global_suffix_st_char)
+            if len(all_gpt_ids) == batch_size:
+                all_valid_phrases, all_hard_negs, total_tok_cnt_, match_phrase_cnt_ = process_batch(all_gpt_ids, all_document, all_global_suffix_st_char, all_length)
+                merged_valid_phrases = merge_valid_phrases(ori_valid_phrases, all_valid_phrases)
+                for instance_idx in range(len(all_gpt_ids)):
+                    output_f.write(json.dumps([all_gpt_ids[instance_idx], merged_valid_phrases[instance_idx], all_document[instance_idx], all_global_suffix_st_char[instance_idx], all_hard_negs[instance_idx]], ensure_ascii=False) + '\n')
+                match_phrase_cnt += match_phrase_cnt_
+                merged_phrase_cnt += sum([len(x) for x in merged_valid_phrases])
+                total_tok_cnt += total_tok_cnt_
+                all_gpt_ids, ori_valid_phrases, all_document, all_global_suffix_st_char, all_length = [], [], [], [], []
+                # print(match_phrase_cnt, total_tok_cnt, merged_phrase_cnt)
 
-                phrases_ = [phrases[0]] + [' ' + x for x in phrases[1:]]
-                phrase_ids = agent.model.tokenizer(phrases_, add_special_tokens=False)['input_ids']
-                tokens = phrase_ids[0]
-                phrase_st_idx = []
-                for i, ids in enumerate(phrase_ids[1:]):
-                    if len(tokens) + len(ids) <= 1024:
-                        phrase_st_idx.append(len(tokens))
-                        tokens.extend(ids)
-                    else:
-                        gpt_ids.append(tokens)
-                        all_st_idx.append(phrase_st_idx)
-                        tokens = tokens[stride:]
-                        phrase_st_idx = [len(tokens)]
-                        tokens.extend(ids)
-                gpt_ids.append(tokens)
-                all_st_idx.append(phrase_st_idx)
-
-            if len(gpt_ids) == batch_size or end_flag:
-                gpt2_ids = pad_sequence([torch.LongTensor(i) for i in gpt_ids], padding_value=agent.model.tokenizer.eos_token_id, batch_first=True).cuda()
-                max_length = gpt2_ids.shape[1]
-                phrase_st_idx = []
-                for i, st_idx in enumerate(all_st_idx):
-                    for idx_ in st_idx:
-                        phrase_st_idx.append(idx_ + max_length * i)
-                phrase_st_idx = torch.LongTensor(phrase_st_idx) - 1 # predicted by prev token
-                gpt2_mask = generate_mask(gpt2_ids, pad_token_idx=agent.model.tokenizer.eos_token_id).cuda()
-                with torch.no_grad():
-                    query_reps = agent.model.model(input_ids=gpt2_ids, attention_mask=gpt2_mask, output_hidden_states=True).hidden_states[-1]
-                    if agent.model.dim_proj is not None:
-                        query_reps = agent.model.dim_proj(query_reps)
-                    query_reps = query_reps.view(-1, query_reps.shape[-1])[phrase_st_idx].cpu()
-                D, I = index.search(query_reps, topk)
-
-                pred_labels = [[[]] for _ in range(batch_size)] # phrases[0] ~ []
-                for suffix_pos_, topk_index, query_doc_idx_ in zip(all_suffix_pos, I, all_query_doc_idx):
-                    suffix_ = all_query[suffix_pos_[0]][suffix_pos_[1]:] + ' ' # ' ' for last word
-                    label_ = []
-                    for i, idx_ in enumerate(topk_index):
-                        pred_phrase = index_phrase[idx_]
-                        pred_doc_idx = index_pos[idx_][0].split(',')[0]
-                        # print(pred_phrase)
-                        if pred_doc_idx != query_doc_idx_ and suffix_.startswith(pred_phrase + ' '):
-                            find_num += 1
-                            label_ = index_pos[idx_]
-                            for j in range(i, topk):
-                                if j + 1 in k_list:
-                                    k_idx = k_list.index(j + 1)
-                                    for x in k_list[k_idx:]:
-                                        results[f'phrase acc@{x}'] += 1
-                                    break
-                            break
-                    pred_labels[suffix_pos_[0]].append(label_)
-                total_num += query_reps.shape[0]
-                # dump 
-                for phrases, ori_refs, doc_index, labels in zip(all_phrases, all_ori_refs, all_index, pred_labels):
-                    result_ = []
-                    for phrase, ori_ref, label in zip(phrases, ori_refs, labels):
-                        if label:
-                            if label != ori_ref:
-                                replace_num += 1
-                            have_label_num += 1
-                            new_label_num += 1
-                            result_.append([phrase, label])
-                        elif ori_ref:
-                            ori_label_num += 1
-                            have_label_num += 1
-                            result_.append([phrase, ori_ref])
-                        else:
-                            result_.append([phrase, []])
-                    output_f.write(json.dumps({"results": result_, "index": doc_index}, ensure_ascii=False) + '\n')
-                gpt_ids = []
-                all_phrases = []
-                all_ori_refs = []
-                all_index = []
-                all_st_idx = []
-                all_query = []
-                all_suffix_pos = []
-                all_query_doc_idx = []
-                # print(f'total: {total_num}, have_label: {have_label_num}')
-                # print(f'find: {find_num}, replace: {replace_num}, new_label: {new_label_num}, ori_num: {ori_label_num}')
-                # for k, v in results.items():
-                #     print(f'{k}: {round(v / total_num * 100, 2)}%')
-                # if total_num > 100000:
-                #     exit()
-            if end_flag:
-                cur_time = time()
-                print(f'{(cur_time - prev_time) // 60} min')
-                prev_time = cur_time
-                print(f'total: {total_num}, have_label: {have_label_num}, {round(have_label_num / total_num * 100, 2)}')
-                print(f'find: {find_num}, replace: {replace_num}, new_label: {new_label_num}, ori_num: {ori_label_num}')
-                for k, v in results.items():
-                    print(f'{k}: {round(v / total_num * 100, 2)}%')
-                break
+        if len(all_gpt_ids) > 0:
+            all_valid_phrases, all_hard_negs, total_tok_cnt_, match_phrase_cnt_ = process_batch(all_gpt_ids, all_document, all_global_suffix_st_char, all_length)
+            merged_valid_phrases = merge_valid_phrases(ori_valid_phrases, all_valid_phrases)
+            for instance_idx in range(len(all_gpt_ids)):
+                output_f.write(json.dumps([all_gpt_ids[instance_idx], merged_valid_phrases[instance_idx], all_document[instance_idx], all_global_suffix_st_char[instance_idx], all_hard_negs[instance_idx]], ensure_ascii=False) + '\n')
+            match_phrase_cnt += match_phrase_cnt_
+            merged_phrase_cnt += len(merged_valid_phrases)
+            total_tok_cnt += total_tok_cnt_
+        print(match_phrase_cnt, match_phrase_cnt, total_tok_cnt, match_phrase_cnt / total_tok_cnt, match_phrase_cnt / total_tok_cnt)
 
 def _regenerate_ref_rank(**args):
     def choose_reference(query, score_vocab, merged_score_vocab, ref_vocab, doc_labels, merged_sent, length_penalty=1.0):

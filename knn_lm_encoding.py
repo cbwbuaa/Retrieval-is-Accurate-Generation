@@ -6,7 +6,7 @@ import torch
 import time
 import pickle
 from tqdm import tqdm
-import json, gc
+import json, gc, re, random
 import numpy as np
 from torch.nn.utils.rnn import pad_sequence
 
@@ -85,10 +85,31 @@ def parser_args():
     parser.add_argument('--max_seq_len', type=int, default=1024)
     return parser.parse_args()
 
-if __name__ == '__main__':
-    args = vars(parser_args())
-    torch.cuda.set_device(args['local_rank'])
-    torch.distributed.init_process_group(backend='nccl', init_method='env://')
+def sample_tokens():
+    data_dir = '/apdcephfs/share_916081/ponybwcao/phrase_extraction/data/wikipedia/knn_index/embedding_tok/small'
+    output_dir = '/apdcephfs/share_916081/ponybwcao/phrase_extraction/data/wikipedia/knn_index/embedding_tok/small_sampled'
+    fns = [fn for fn in os.listdir(data_dir) if fn.startswith('emb_')]
+    identifiers = [re.fullmatch(f'emb_(\d+)_(\d+).npy', fn).groups() for fn in fns]
+    all_emb = []
+    all_tok = []
+    for idx1, idx2 in tqdm(identifiers):
+        emb_fn = f'{data_dir}/emb_{idx1}_{idx2}.npy'
+        tok_fn = f'{data_dir}/tok_{idx1}_{idx2}.npy'
+        emb = np.load(emb_fn)
+        tok = np.load(tok_fn)
+        random_idx = random.sample(list(range(len(emb))), int(len(emb) * 0.005))
+        all_emb.append(emb[random_idx])
+        all_tok.append(tok[random_idx])
+    np.save(f'{output_dir}/emb.npy', np.vstack(all_emb))
+    np.save(f'{output_dir}/tok.npy', np.vstack(all_tok))
 
-    args['worker_idx'] = args['local_rank']
-    gpt_encoding(args)
+if __name__ == '__main__':
+    ## encoding
+    # args = vars(parser_args())
+    # torch.cuda.set_device(args['local_rank'])
+    # torch.distributed.init_process_group(backend='nccl', init_method='env://')
+    # args['worker_idx'] = args['local_rank']
+    # gpt_encoding(args)
+
+    # sampling
+    sample_tokens()

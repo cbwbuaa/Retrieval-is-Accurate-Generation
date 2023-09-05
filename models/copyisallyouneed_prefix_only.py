@@ -175,7 +175,7 @@ class CopyisallyouneedPrefixOnly(nn.Module):
     @torch.no_grad()
     def evaluate(self, quiet=True):
         self.model.eval()
-        phrase_embedding = np.memmap('/apdcephfs/share_916081/ponybwcao/phrase_extraction/data/wikipedia/phrase_embedding_index/PCA_emb_merged.npy', dtype=np.float32, mode='r', shape=(138543105, 128))
+        phrase_embedding = np.memmap('/apdcephfs/share_916081/ponybwcao/phrase_extraction/data/wikipedia/phrase_embedding_index/PCA_emb_merged.npy', dtype=np.float32, mode='r', shape=(137101097, 128))
 
         data_fn = f'{self.args["training_data_dir"]}/validation_tok_{self.args["model_size"]}'
         with open(data_fn) as f:
@@ -201,7 +201,7 @@ class CopyisallyouneedPrefixOnly(nn.Module):
                 emb_idx_list.append(ref_pos)
                 phrase_list.append(phrase)
         if emb_idx_list:
-            embeddings = torch.from_numpy(self.phrase_embedding[emb_idx_list])
+            embeddings = torch.from_numpy(phrase_embedding[emb_idx_list])
         else:
             embeddings = None
         # print(embeddings.shape) # torch.Size([19806, 128])
