@@ -6,6 +6,9 @@ import sys, os, datetime
 import torch.multiprocessing as mp
 from time import time
 
+def str2bool(v):
+    return v.lower() in ('true', '1')
+
 def parser_args():
     parser = argparse.ArgumentParser(description='train parameters')
     parser.add_argument('--dataset', default='wikipedia', type=str)
@@ -14,19 +17,24 @@ def parser_args():
     parser.add_argument('--model_size', type=str, default='small')
     parser.add_argument('--loss_type', type=str, default='focal_loss')
     parser.add_argument('--version', type=str)
-    parser.add_argument('--pretrain_model_path', type=str)
+    parser.add_argument('--trained_model_path', type=str, default=None)
     parser.add_argument('--training_data_dir', type=str)
     parser.add_argument('--multi_gpu', type=str, default=None)
+    parser.add_argument('--root_dir', type=str, default=None)
+    parser.add_argument('--log_dir', type=str, default=None)
     parser.add_argument('--local_rank', type=int)
     parser.add_argument('--total_step', type=int)
     parser.add_argument('--save_every', type=int)
     parser.add_argument('--total_workers', type=int)
-    parser.add_argument('--resume', type=bool, default=False)
-    parser.add_argument('--random_initialize', type=bool, default=False)
-    parser.add_argument('--normalize', type=bool, default=False)
+    parser.add_argument('--resume', type=str2bool, default=False)
+    parser.add_argument('--l2_penalty', type=str2bool, default=False)
+    parser.add_argument('--random_initialize', type=str2bool, default=False)
+    parser.add_argument('--normalize', type=str2bool, default=False)
+    parser.add_argument('--FN', type=str2bool, default=True)
     parser.add_argument('--data_file_num', type=int, default=8)
     parser.add_argument('--temp', type=float, default=1.0)
     parser.add_argument('--beta', type=float, default=0.7)
+    parser.add_argument('--gamma', type=int, default=2)
     parser.add_argument('--lr', type=float, default=5e-5)
     parser.add_argument('--iter_to_accumulate', type=int, default=1)
     parser.add_argument('--warmup_step', type=int, default=0)
@@ -44,7 +52,7 @@ def data_proc(args, queue):
             queue.put(x)
 
 def asynchronous_load(args):
-    queue = mp.Queue(50)
+    queue = mp.Queue(20)
     data_generator = mp.Process(target=data_proc, args=(args, queue))
     data_generator.daemon = True
     data_generator.start()

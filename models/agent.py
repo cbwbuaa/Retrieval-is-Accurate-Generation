@@ -492,35 +492,64 @@ class Agent:
         prefix_length = len(ids[0])
         candidates = []
         bt = time()
+        phrase_cnt = 0
+        tok_cnt = 0
         while len(ids[0]) <= prefix_length + self.args['max_gen_len']:
-            ids, candidate = self.retrieve_one_step_fast(ids, retriever, phrase_sources, decoding_method=decoding_method, top_k=top_k, top_p=top_p, temp=temp)
+            ids, candidate, is_phrase = self.retrieve_one_step_fast(ids, retriever, phrase_sources, decoding_method=decoding_method, top_k=top_k, top_p=top_p, temp=temp)
             candidates.append(candidate)
+            if is_phrase:
+                phrase_cnt += 1
+            else:
+                tok_cnt += 1
         inference_time = time() - bt
         if get_time_cost:
-            return self.model.tokenizer.decode(ids[0, prefix_length:]), candidates, inference_time
+            return self.model.tokenizer.decode(ids[0, prefix_length:]), candidates, inference_time, phrase_cnt, tok_cnt
         else:
-            return self.model.tokenizer.decode(ids[0, prefix_length:]), candidates, None
+            return self.model.tokenizer.decode(ids[0, prefix_length:]), candidates, None, phrase_cnt, tok_cnt
 
     @torch.no_grad()
     def retrieve_one_step_fast(self, ids, retriever, phrase_sources, end_token='<|endoftext|>', decoding_method='greedy', temp=1., top_k=0, top_p=0.92):
         self.model.eval()
         query = self.model.get_query_rep(ids)#.cpu() #.numpy()
-        topk_phrase = 128
+        topk_phrase = 1024
+        phrase_threshold = 0.05
         D, I = retriever.search(query.cpu(), topk_phrase)
         # D = torch.from_numpy(D)
         if decoding_method == 'greedy':
             index = I[0][0].item()
         elif decoding_method == 'nucleus_sampling':
+            # phrase_map = I[0] >= self.model.vocab_size
+            # print(sum(phrase_map))
+            # phrase_map = phrase_map.tolist()
+            # if True in phrase_map:
+            #     print(phrase_map.index(True))
+            # else:
+            #     print('No phrase.')
             score = top_k_top_p_filtering(D[0], top_k=top_k, top_p=top_p)
-            index = torch.multinomial(F.softmax(score/temp, dim=-1), num_samples=1)
-            index = I[0][index].item()
+            score = F.softmax(score/temp, dim=-1)
+            inner_index = torch.multinomial(score, num_samples=1)
+            index = I[0][inner_index].item()
+            if index >= self.model.vocab_size:
+                if score[inner_index] >= phrase_threshold:
+                    print(phrase_sources[index - self.model.vocab_size], score[inner_index])
+                    pass
+                else:
+                    score = torch.matmul(query, self.model.dim_proj(self.model.token_embeddings).t())[0]
+                    score = top_k_top_p_filtering(score, top_k=top_k, top_p=top_p)
+                    score = F.softmax(score/temp, dim=-1)
+                    index = torch.multinomial(score, num_samples=1).item()
         else:
             raise NotImplementedError
 
         if index < self.model.vocab_size:
             candidate = index
+            is_phrase = False
         else:
             candidate = phrase_sources[index - self.model.vocab_size]
+            is_phrase = True
+        # candidate = phrase_sources[index]
+        # is_phrase = True
+
         # get textual candidate
         if type(candidate) == int: # tok
             # candidate = ' ' + self.model.bert_tokenizer.decode(candidate).replace('[UNK]', '<|endoftext|>')
@@ -534,7 +563,7 @@ class Agent:
             raise NotImplementedError
         sub_ids = torch.LongTensor(sub_ids).unsqueeze(0).cuda()
         ids = torch.cat((ids, sub_ids), dim=-1)
-        return ids, candidate
+        return ids, candidate, is_phrase
 
     @torch.no_grad()
     def get_phrases_fast(self, documents, add_token=True):
@@ -788,7 +817,6 @@ class Agent:
         preds = [self.model.bert_tokenizer.decode(x) for x in preds]
         return preds
 
-
 def top_k_top_p_filtering(logits, top_k=0, top_p=0.0, threshold=-float('Inf'), filter_value=-np.inf):
     assert logits.dim() == 1
     top_k = min(top_k, logits.size(-1))
@@ -808,6 +836,3 @@ def top_k_top_p_filtering(logits, top_k=0, top_p=0.0, threshold=-float('Inf'), f
     indices_to_remove = logits < threshold
     logits[indices_to_remove] = filter_value
     return logits
-
-
-

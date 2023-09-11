@@ -1,14 +1,18 @@
 from transformers import GPT2LMHeadModel, GPT2Tokenizer
 from torch.utils.data import Dataset, DataLoader
+from tqdm import tqdm
+from header import *
+from torch.nn.utils.rnn import pad_sequence
 import argparse
 import os
 import torch
 import time
 import pickle
-from tqdm import tqdm
 import json, gc, re, random
 import numpy as np
-from torch.nn.utils.rnn import pad_sequence
+import multiprocessing as mp
+sys.path.append('/apdcephfs/share_916081/ponybwcao/phrase_extraction/training')
+from utils import *
 
 def generate_mask(ids, pad_token_idx=0):
     '''generate the mask matrix of the ids, default padding token idx is 0'''
@@ -71,7 +75,7 @@ def gpt_encoding(args):
     tokenizer = GPT2Tokenizer.from_pretrained(f'/apdcephfs/share_916081/ponybwcao/PLM/GPT2-{args["model_size"]}')
     model = GPT2LMHeadModel.from_pretrained(f'/apdcephfs/share_916081/ponybwcao/PLM/GPT2-{args["model_size"]}', return_dict=True)
     model = model.cuda()
-    model = model.eval()
+    model.eval()
     
     inference(**args)
     
@@ -101,7 +105,53 @@ def sample_tokens():
         all_emb.append(emb[random_idx])
         all_tok.append(tok[random_idx])
     np.save(f'{output_dir}/emb.npy', np.vstack(all_emb))
-    np.save(f'{output_dir}/tok.npy', np.vstack(all_tok))
+    np.save(f'{output_dir}/tok.npy', np.hstack(all_tok))
+
+def sample_tokens_mp(data_dir, output_dir, identifiers, global_idx):
+    all_emb = []
+    all_tok = []
+    for idx1, idx2 in tqdm(identifiers, disable=global_idx!=0):
+        emb_fn = f'{data_dir}/emb_{idx1}_{idx2}.npy'
+        tok_fn = f'{data_dir}/tok_{idx1}_{idx2}.npy'
+        emb = np.load(emb_fn)
+        tok = np.load(tok_fn)
+        random_idx = random.sample(list(range(len(emb))), int(len(emb) * 0.005))
+        all_emb.append(emb[random_idx])
+        all_tok.append(tok[random_idx])
+    np.save(f'{output_dir}/emb_{global_idx}.npy', np.vstack(all_emb))
+    np.save(f'{output_dir}/tok_{global_idx}.npy', np.hstack(all_tok))
+
+def sample_tokens_runner():
+    data_dir = '/apdcephfs/share_916081/ponybwcao/phrase_extraction/data/wikipedia/knn_index/embedding_tok/small'
+    output_dir = '/apdcephfs/share_916081/ponybwcao/phrase_extraction/data/wikipedia/knn_index/embedding_tok/small_sampled'
+    fns = [fn for fn in os.listdir(data_dir) if fn.startswith('emb_')]
+    identifiers = [re.fullmatch(f'emb_(\d+)_(\d+).npy', fn).groups() for fn in fns]
+    
+    task_num = 10
+    datasets = split_into_chunk(identifiers, task_num)
+    os_context = mp.get_context('spawn')
+    process_list = []
+    for global_idx in range(task_num):
+        p = os_context.Process(target=sample_tokens_mp, args=(data_dir, output_dir, datasets[global_idx], global_idx)) #实例化进程对象
+        p.start()
+        process_list.append(p)
+
+    for p in process_list:
+        p.join()
+    print('Begin to merge.')
+    all_emb = []
+    all_tok = []
+    for global_idx in tqdm(range(task_num), desc='Merge'):
+        emb = np.load(f'{output_dir}/emb_{global_idx}.npy')
+        tok = np.load(f'{output_dir}/tok_{global_idx}.npy')
+        all_emb.append(emb)
+        all_tok.append(tok)
+    np.save(f'{output_dir}/emb.npy', np.vstack(all_emb))
+    np.save(f'{output_dir}/tok.npy', np.hstack(all_tok))
+    for global_idx in tqdm(range(task_num), desc='Remove temp files'):
+        os.remove(f'{output_dir}/emb_{global_idx}.npy')
+        os.remove(f'{output_dir}/tok_{global_idx}.npy')
+    print('Finish.')
 
 if __name__ == '__main__':
     ## encoding
@@ -111,5 +161,7 @@ if __name__ == '__main__':
     # args['worker_idx'] = args['local_rank']
     # gpt_encoding(args)
 
-    # sampling
-    sample_tokens()
+    ## sampling
+    # sample_tokens()
+    # sample_tokens_runner()
+

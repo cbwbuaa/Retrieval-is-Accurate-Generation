@@ -50,12 +50,12 @@ models:
 # ========= Global configuration ========== #
 # root_dir: /dockerdata/johntianlan/sources/Copyisallyouneed
 # root_dir: /apdcephfs/share_916081/johntianlan/copyisallyouneed
-root_dir: /apdcephfs/share_916081/shared_info/ponybwcao/Copyisallyouneed
+# root_dir: /apdcephfs/share_916081/shared_info/ponybwcao/Copyisallyouneed
 
 # data_root_dir: /dockerdata/johntianlan/sources/Copyisallyouneed/data/wikitext103_1024
 # data_root_dir: /apdcephfs/share_916081/johntianlan/copyisallyouneed/data/lawmt_1024
 # data_root_dir: /apdcephfs/share_916081/johntianlan/copyisallyouneed/data/en_wiki_1024
-data_root_dir: /apdcephfs/share_916081/shared_info/ponybwcao/Copyisallyouneed/data/wikitext103_1024
-log_dir: /apdcephfs/share_916081/shared_info/ponybwcao/Copyisallyouneed/log
+# data_root_dir: /apdcephfs/share_916081/shared_info/ponybwcao/Copyisallyouneed/data/wikitext103_1024
+# log_dir: /apdcephfs/share_916081/shared_info/ponybwcao/Copyisallyouneed/log
 # version: 2004
 # ========= Global configuration ========== #
