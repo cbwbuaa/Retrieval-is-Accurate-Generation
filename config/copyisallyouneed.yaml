@@ -97,7 +97,6 @@ test:
     seed: 0
     batch_size: 1
     prefix_length_rate: 0.5
-    max_gen_len: 128
     dropout: 0.1
     doc_topk: 1024
     # phrase_topk for debug mode

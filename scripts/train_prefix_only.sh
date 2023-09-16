@@ -24,7 +24,7 @@ cuda=$1
 # ========== metadata ========== #
 
 temp=2.0
-beta=0.5
+beta=0.8
 gamma=4
 loss_type=focal_loss
 warmup_step=10000
@@ -34,12 +34,19 @@ model_size=small
 batch_size=2
 l2_penalty=false
 FN=false
+sep_proj=false
+random_initialize=true
 # version=test
-version=0910_EM1_FN_${FN}_l2_${l2_penalty}_beta_${beta}_gamma_${gamma}_${model_size}_bs${batch_size}_temp${temp}_${loss_type}_lr${lr}
+version=0916_EM2_random_${random_initialize}_merged_FN_${FN}_sepProj_${sep_proj}_l2_${l2_penalty}_beta_${beta}_gamma_${gamma}_${model_size}_bs${batch_size}_temp${temp}_${loss_type}_lr${lr}_from_scratch
+# version=0913_EM2_merged_FN_${FN}_sepProj_${sep_proj}_l2_${l2_penalty}_beta_${beta}_gamma_${gamma}_${model_size}_bs${batch_size}_temp${temp}_${loss_type}_lr${lr}
+# version=0910_EM1_FN_${FN}_l2_${l2_penalty}_beta_${beta}_gamma_${gamma}_${model_size}_bs${batch_size}_temp${temp}_${loss_type}_lr${lr}
 
 # pretrain_model_path=/apdcephfs/share_916081/shared_info/ponybwcao/Copyisallyouneed/ckpt/wikitext103/copyisallyouneed/train_pipeline/best_0601_shuffle_queue5k_mergedQ_eval1k_dim128_focal_loss_lr1e-4_prebatch0_beta0.5_warmup50000_prenum0_temp2.0_400000.pt
 training_data_dir=/apdcephfs/share_916081/ponybwcao/phrase_extraction/data/minipile/match_result_tok
-trained_model_path=/apdcephfs/share_916081/ponybwcao/tmp/copyisallyouneed_v2/ckpt/wikipedia/copyisallyouneed/train/best_0901_small_bs4_temp2.0_focal_lr1e-4_100000.pt
+
+# trained_model_path=/apdcephfs/share_916081/ponybwcao/tmp/copyisallyouneed_v2/ckpt/wikipedia/copyisallyouneed/train/best_0910_EM1_FN_false_l2_false_beta_0.8_gamma_2_small_bs2_temp2.0_focal_loss_lr1e-4_60000.pt
+# trained_model_path=/apdcephfs/share_916081/ponybwcao/tmp/copyisallyouneed_v2/ckpt/wikipedia/copyisallyouneed/train/best_0901_small_bs4_temp2.0_focal_lr1e-4_100000.pt
+# trained_model_path=/apdcephfs/share_916081/ponybwcao/tmp/copyisallyouneed_v2/ckpt/wikipedia/copyisallyouneed/train/best_0901_medium_bs2_temp2.0_focal_lr1e-4_150000.pt
 
 root_dir=/apdcephfs/share_916081/ponybwcao/tmp/copyisallyouneed_v2
 log_dir=/apdcephfs/share_916081/ponybwcao/tmp/copyisallyouneed_v2/log
@@ -56,8 +63,8 @@ recoder_file=$root_dir/rest/$dataset/$model/recoder_train_$version.txt
 
 gpu_ids=(${cuda//,/ })
 CUDA_VISIBLE_DEVICES=$cuda python3.8 -m torch.distributed.launch --nproc_per_node=${#gpu_ids[@]} --master_addr 127.0.0.1 --master_port 28445 train_prefix_only.py \
-    --total_step 100000 \
-    --save_every 10000 \
+    --total_step 1000000 \
+    --save_every 50000 \
     --dataset $dataset \
     --root_dir $root_dir \
     --log_dir $log_dir \
@@ -75,10 +82,12 @@ CUDA_VISIBLE_DEVICES=$cuda python3.8 -m torch.distributed.launch --nproc_per_nod
     --phrase_dim $phrase_dim \
     --model_size $model_size \
     --batch_size $batch_size \
-    --trained_model_path $trained_model_path \
     --l2_penalty $l2_penalty \
     --gamma $gamma \
-    --FN $FN
+    --FN $FN \
+    --sep_proj $sep_proj \
+    --random_initialize $random_initialize
+    # --trained_model_path $trained_model_path
     # --resume true
     #--random_initialize true #> $root_dir/log/train_pipeline/${version}.error 2>&1 &
     # --pretrain_model_path $pretrain_model_path \

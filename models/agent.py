@@ -483,7 +483,6 @@ class Agent:
             phrase_sources.extend([idx for idx in range(len(self.model.tokenizer))])
         return phrase_reps, phrase_sources
     
-
     # for phrase retrieval
     @torch.no_grad()
     def retrieve_one_phrase(self, text, retriever, phrase_sources, decoding_method='greedy', top_k=0, top_p=0.95, temp=1.0, get_time_cost=False):
@@ -511,33 +510,24 @@ class Agent:
     def retrieve_one_step_fast(self, ids, retriever, phrase_sources, end_token='<|endoftext|>', decoding_method='greedy', temp=1., top_k=0, top_p=0.92):
         self.model.eval()
         query = self.model.get_query_rep(ids)#.cpu() #.numpy()
-        topk_phrase = 1024
-        phrase_threshold = 0.05
+        topk_phrase = 128
+        phrase_threshold = 0.8
         D, I = retriever.search(query.cpu(), topk_phrase)
         # D = torch.from_numpy(D)
         if decoding_method == 'greedy':
             index = I[0][0].item()
         elif decoding_method == 'nucleus_sampling':
-            # phrase_map = I[0] >= self.model.vocab_size
-            # print(sum(phrase_map))
-            # phrase_map = phrase_map.tolist()
-            # if True in phrase_map:
-            #     print(phrase_map.index(True))
-            # else:
-            #     print('No phrase.')
             score = top_k_top_p_filtering(D[0], top_k=top_k, top_p=top_p)
             score = F.softmax(score/temp, dim=-1)
+            phrase_index = I[0] >= self.model.vocab_size
+            token_index = ~phrase_index
+            valid_phrase_mask = score >= phrase_threshold
+            overall_mask = (valid_phrase_mask & phrase_index) | token_index
+            overall_mask = overall_mask.to(torch.long)
+            if overall_mask.sum() > 0:
+                score = score * overall_mask
             inner_index = torch.multinomial(score, num_samples=1)
             index = I[0][inner_index].item()
-            if index >= self.model.vocab_size:
-                if score[inner_index] >= phrase_threshold:
-                    print(phrase_sources[index - self.model.vocab_size], score[inner_index])
-                    pass
-                else:
-                    score = torch.matmul(query, self.model.dim_proj(self.model.token_embeddings).t())[0]
-                    score = top_k_top_p_filtering(score, top_k=top_k, top_p=top_p)
-                    score = F.softmax(score/temp, dim=-1)
-                    index = torch.multinomial(score, num_samples=1).item()
         else:
             raise NotImplementedError
 
@@ -564,6 +554,94 @@ class Agent:
         sub_ids = torch.LongTensor(sub_ids).unsqueeze(0).cuda()
         ids = torch.cat((ids, sub_ids), dim=-1)
         return ids, candidate, is_phrase
+
+    @torch.no_grad()
+    def batch_retrieve_one_phrase(self, text, retriever, phrase_sources, token_embs, decoding_method='greedy', top_k=0, top_p=0.95, temp=1.0, get_time_cost=False, phrase_threshold=0.8, topk_phrase=128):
+        self.model.eval()
+        ids = self.model.tokenizer(text, return_attention_mask=False, add_special_tokens=False)['input_ids']
+        prefix_length = [len(x) for x in ids]
+        candidates = [[] for _ in range(len(ids))]
+        bt = time()
+        phrase_cnt = 0
+        tok_cnt = 0
+        phrase_tok_cnt = 0
+        while any([len(ids[instance_idx]) <= prefix_length[instance_idx] + self.args['max_gen_len'] for instance_idx in range(len(ids))]):
+            todo_index = [instance_idx for instance_idx in range(len(ids)) if len(ids[instance_idx]) <= prefix_length[instance_idx] + self.args['max_gen_len']]
+            new_ids, all_candidate, phrase_num, token_num, phrase_tok_num = self.batch_retrieve_one_step_fast([ids[i] for i in todo_index], retriever, phrase_sources, token_embs, decoding_method=decoding_method, top_k=top_k, top_p=top_p, temp=temp, phrase_threshold=phrase_threshold, topk_phrase=topk_phrase)
+            for i, instance_idx in enumerate(todo_index):
+                candidates[instance_idx].append(all_candidate[i])
+                ids[instance_idx] = new_ids[i]
+            phrase_cnt += phrase_num
+            tok_cnt += token_num
+            phrase_tok_cnt += phrase_tok_num
+        inference_time = time() - bt
+        if get_time_cost:
+            return [self.model.tokenizer.decode(ids[instance_idx][prefix_length[instance_idx]:]) for instance_idx in range(len(ids))], candidates, inference_time, phrase_cnt, tok_cnt, phrase_tok_cnt
+        else:
+            return [self.model.tokenizer.decode(ids[instance_idx][prefix_length[instance_idx]:]) for instance_idx in range(len(ids))], candidates, None, phrase_cnt, tok_cnt, phrase_tok_cnt
+
+    @torch.no_grad()
+    def batch_retrieve_one_step_fast(self, ids, retriever, phrase_sources, token_embs, end_token='<|endoftext|>', decoding_method='greedy', temp=1., top_k=0, top_p=0.92, phrase_threshold=0.8, topk_phrase=128):
+        self.model.eval()
+        query = self.model.get_query_rep_batch(ids)#.cpu() #.numpy()
+        D, I = retriever.search(query.cpu(), topk_phrase)
+        token_logits = torch.matmul(query, token_embs.t())
+
+        all_candidtate = []
+        all_sub_ids = []
+        phrase_num = 0
+        phrase_tok_num = 0
+        token_num = 0
+        for instance_idx in range(len(ids)):
+            if decoding_method == 'greedy':
+                index = I[instance_idx][0].item()
+            elif decoding_method == 'nucleus_sampling':
+                score = top_k_top_p_filtering(D[instance_idx], top_k=top_k, top_p=top_p)
+                score = F.softmax(score / temp, dim=-1)
+                phrase_index = I[instance_idx] >= self.model.vocab_size
+                token_index = ~phrase_index
+                valid_phrase_mask = score >= phrase_threshold
+                overall_mask = (valid_phrase_mask & phrase_index) | token_index
+                overall_mask = overall_mask.to(torch.long)
+                valid_flag = False
+                if overall_mask.sum() > 0:
+                    score_ = score * overall_mask
+                    if score_.sum() > 0:
+                        score = score_
+                        valid_flag = True
+                if valid_flag:
+                    inner_index = torch.multinomial(score, num_samples=1)
+                    index = I[instance_idx][inner_index].item()
+                else:
+                    score = top_k_top_p_filtering(token_logits[instance_idx], top_k=top_k, top_p=top_p)
+                    score = F.softmax(score / temp, dim=-1)
+                    index = torch.multinomial(score, num_samples=1).item()
+            else:
+                raise NotImplementedError
+
+            if index < self.model.vocab_size:
+                candidate = index
+                token_num += 1
+            else:
+                candidate = phrase_sources[index - self.model.vocab_size]
+                phrase_num += 1
+            # candidate = phrase_sources[index]
+
+            # get textual candidate
+            if type(candidate) == int: # tok
+                # candidate = ' ' + self.model.bert_tokenizer.decode(candidate).replace('[UNK]', '<|endoftext|>')
+                # sub_ids = self.model.tokenizer.encode(candidate, add_special_tokens=False)
+                sub_ids = [candidate]
+                candidate = self.model.tokenizer.convert_ids_to_tokens(candidate).replace('[UNK]', '<|endoftext|>')
+            elif type(candidate) == str: # phrase
+                candidate = ' ' + candidate
+                sub_ids = self.model.tokenizer.encode(candidate, add_special_tokens=False)
+                phrase_tok_num += len(sub_ids)
+            else:
+                raise NotImplementedError
+            ids[instance_idx].extend(sub_ids)
+            all_candidtate.append(candidate)
+        return ids, all_candidtate, phrase_num, token_num, phrase_tok_num
 
     @torch.no_grad()
     def get_phrases_fast(self, documents, add_token=True):
@@ -704,6 +782,41 @@ class Agent:
         inference_time = time() - bt
         string = self.model.vocab.decode(output[0, length:])
         return string, inference_time
+
+    @torch.no_grad()
+    def gpt2_generation_batch(self, prefix, decoding_method='nucleus_sampling', top_k=0, top_p=0.95, temp=1.0, get_time_cost=False):
+        self.model.eval()
+        self.model.tokenizer.padding_side = 'left'
+        self.model.tokenizer.pad_token = self.model.tokenizer.eos_token
+        encoded_dict = self.model.tokenizer(prefix, return_tensors="pt", padding=True, add_special_tokens=False, return_length=True)
+        input_ids = encoded_dict['input_ids'].cuda()
+        attention_mask = encoded_dict['attention_mask'].cuda()
+        all_length = encoded_dict['length']
+
+        use_cache = False if get_time_cost else True
+        bt = time()
+        if decoding_method == 'nucleus_sampling':
+            output = self.model.model.generate(
+                input_ids,
+                attention_mask=attention_mask,
+                do_sample=True,
+                max_length=all_length[0] + 128,
+                top_p=top_p,
+                top_k=0,
+                pad_token_id=self.model.tokenizer.eos_token_id,
+                use_cache=use_cache
+            )
+        else:
+            output = self.model.model.generate(
+                input_ids,
+                attention_mask=attention_mask,
+                max_length=all_length[0] + 128,
+                pad_token_id=self.model.tokenizer.eos_token_id,
+                use_cache=use_cache
+            )
+        inference_time = time() - bt
+        output = [self.model.tokenizer.decode(output[i, all_length[i]:]) for i in range(len(prefix))]
+        return output, inference_time
 
     @torch.no_grad()
     def knnlm_generation(self, prefix, decoding_method='nucleus_sampling', top_k=0, top_p=0.95, temp=1.0, get_time_cost=False):

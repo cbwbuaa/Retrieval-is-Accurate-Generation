@@ -12,7 +12,8 @@ class CopyisallyouneedPrefixOnly(Dataset):
         self.vocab = AutoTokenizer.from_pretrained(args['prefix_encoder_tokenizer'][args['lang']][self.args['model_size']])
 
         # self.phrase_embedding = np.memmap('/apdcephfs/share_916081/ponybwcao/phrase_extraction/data/wikipedia/phrase_embedding_index/PCA_emb_merged_memmap.npy', dtype=np.float32, mode='r', shape=(137101097, 128))
-        self.file_lists = [f'{args["training_data_dir"]}/train_chunk{args["local_rank"]}_tok_{args["model_size"]}_EM']
+        self.file_lists = [f'/apdcephfs/share_916081/ponybwcao/phrase_extraction/data/minipile/minipile_wiki/all_merged_shuffled_chunk{args["local_rank"]}']
+        # self.file_lists = [f'{args["training_data_dir"]}/train_chunk{args["local_rank"]}_tok_small_EM']
         if args['local_rank'] == 0:
             print(f'[!] file list for worker{self.args["local_rank"]}: {self.file_lists}')
         
@@ -23,7 +24,8 @@ class CopyisallyouneedPrefixOnly(Dataset):
         self.cache_prefix = []
         self.max_input_length = args['max_len']
         self.batch_size = args['batch_size']
-        self.phrase_table = load_emb('/apdcephfs/share_916081/ponybwcao/phrase_extraction/data/wikipedia/phrase_embedding_index/PCA_phrase_merged.pkl')
+        if args['FN']:
+            self.phrase_table = load_emb('/apdcephfs/share_916081/ponybwcao/phrase_extraction/data/wikipedia/phrase_embedding_index/PCA_phrase_merged.pkl')
 
         self.cache = []
         # self.data_queue = []
@@ -96,7 +98,8 @@ class CopyisallyouneedPrefixOnly(Dataset):
                     if neg_ref_pos not in emb_idx_map:
                         emb_idx_map[neg_ref_pos] = len(emb_idx_list)
                         emb_idx_list.append(neg_ref_pos)
-                        phrase_list.append(self.phrase_table[neg_ref_pos])
+                        if self.args['FN']:
+                            phrase_list.append(self.phrase_table[neg_ref_pos])
         # t0 = time()
         # if emb_idx_list:
         #     embeddings = torch.from_numpy(self.phrase_embedding[emb_idx_list])

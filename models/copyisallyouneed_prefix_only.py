@@ -35,10 +35,11 @@ class CopyisallyouneedPrefixOnly(nn.Module):
         assert self.token_embeddings.shape[0] == self.vocab_size
         
         self.phrase_dim = self.args['phrase_dim'] if 'phrase_dim' in self.args else self.model.config.hidden_size
-        if self.phrase_dim != self.model.config.hidden_size:
-            self.dim_proj = nn.Linear(self.model.config.hidden_size, self.phrase_dim)
+        if args['sep_proj']:
+            self.token_proj = nn.Linear(self.model.config.hidden_size, self.phrase_dim)
+            self.prefix_proj = nn.Linear(self.model.config.hidden_size, self.phrase_dim)
         else:
-            self.dim_proj = None
+            self.dim_proj = nn.Linear(self.model.config.hidden_size, self.phrase_dim)
         self.gen_loss_fct = nn.CrossEntropyLoss(ignore_index=self.pad)
         self.phrase_norm_mean = 0.3515
         self.phrase_embedding = np.memmap('/apdcephfs/share_916081/ponybwcao/phrase_extraction/data/wikipedia/phrase_embedding_index/PCA_emb_merged_memmap.npy', dtype=np.float32, mode='r', shape=(137101097, 128))
@@ -46,8 +47,32 @@ class CopyisallyouneedPrefixOnly(nn.Module):
     @torch.no_grad()
     def get_query_rep(self, ids):
         output = self.model(input_ids=ids, output_hidden_states=True)['hidden_states'][-1][:, -1, :]
-        if self.dim_proj:
+        if self.args['sep_proj']:
+            output = self.prefix_proj(output)
+        else:
             output = self.dim_proj(output)
+        return output
+    
+    @torch.no_grad()
+    def get_query_rep_batch(self, ids):
+        all_length = [len(x) for x in ids]
+        all_gpt_ids = pad_sequence([torch.LongTensor(x) for x in ids], padding_value=self.tokenizer.eos_token_id, batch_first=True).cuda()
+        all_gpt2_mask = generate_mask(all_gpt_ids, pad_token_idx=self.tokenizer.eos_token_id).cuda()
+
+        output = self.model(input_ids=all_gpt_ids, attention_mask=all_gpt2_mask, output_hidden_states=True)['hidden_states'][-1]
+        output_mask = torch.LongTensor(all_length) - 1
+        output = output[range(len(ids)), output_mask]
+        if self.args['sep_proj']:
+            output = self.prefix_proj(output)
+        else:
+            output = self.dim_proj(output)
+        return output
+
+    def get_token_reps(self):
+        if self.args['sep_proj']:
+            output = self.token_proj(self.token_embeddings)
+        else:
+            output = self.dim_proj(self.token_embeddings)
         return output
 
     def get_token_loss(self, ids, hs, mask, token_reps, do_eval=True):
@@ -77,14 +102,18 @@ class CopyisallyouneedPrefixOnly(nn.Module):
     def forward(self, batch):  
         # model_st_time = time()
         token_reps = self.token_embeddings
-        if self.dim_proj is not None:
+        if self.args['sep_proj']:
+            token_reps = self.token_proj(token_reps)
+        else:
             token_reps = self.dim_proj(token_reps)
         
         ## gpt2 query encoder
         ids, ids_mask = batch['gpt2_ids'].cuda(), batch['gpt2_mask'].cuda()
         query_hidden_states = \
         self.model(input_ids=ids, attention_mask=ids_mask, output_hidden_states=True).hidden_states[-1]
-        if self.dim_proj is not None:
+        if self.args['sep_proj']:
+            query_hidden_states = self.prefix_proj(query_hidden_states)
+        else:
             query_hidden_states = self.dim_proj(query_hidden_states)
         AR_loss = self.get_token_loss(ids, query_hidden_states, ids_mask, token_reps, do_eval=False)
         # print('AR_loss_acc:', AR_loss, acc)
@@ -126,14 +155,14 @@ class CopyisallyouneedPrefixOnly(nn.Module):
             # print(false_neg_mask.shape, logits.shape)
             logits = torch.where(false_neg_mask.to(torch.bool), logits, torch.tensor(-np.inf).to(torch.half).cuda())
         if torch.isnan(logits).any():
-            phrase_list = batch['phrase_list']
+            # phrase_list = batch['phrase_list']
             sys.stderr.write(f"logits nan\n")
             sys.stderr.write(f"logits: {logits}\n")
             nan_pos = torch.nonzero(torch.isnan(logits)).squeeze()
             sys.stderr.write(f"nan pos: {nan_pos}\n")
-            if not nan_pos.shape[0] == 0:
-                if nan_pos[0, 0].item() >= self.vocab_size:
-                    sys.stderr.write(f'error phrase: {phrase_list[nan_pos[0, 0].item() - self.vocab_size]}')
+            # if not nan_pos.shape[0] == 0:
+            #     if nan_pos[0, 0].item() >= self.vocab_size:
+            #         sys.stderr.write(f'error phrase: {phrase_list[nan_pos[0, 0].item() - self.vocab_size]}')
             sys.stderr.write(f"query has nan: {torch.isnan(query).any()}\n")
             sys.stderr.write(f"query nan pos: {torch.nonzero(torch.isnan(query)).squeeze()}\n")
             sys.stderr.write(f"token emb has nan: {torch.isnan(token_reps).any()}\n")
@@ -160,14 +189,14 @@ class CopyisallyouneedPrefixOnly(nn.Module):
         if token_num > 0:
             loss += (1 - beta) * loss_[token_indexes].mean()
         if torch.isnan(loss).any():
-            phrase_list = batch['phrase_list']
+            # phrase_list = batch['phrase_list']
             sys.stderr.write(f"loss nan\n")
             sys.stderr.write(f"loss: {loss}\n")
             nan_pos = torch.nonzero(torch.isnan(logits)).squeeze()
             sys.stderr.write(f"nan pos: {nan_pos}\n")
-            if not nan_pos.shape[0] == 0:
-                if nan_pos[0, 0].item() >= self.vocab_size:
-                    sys.stderr.write(f'error phrase: {phrase_list[nan_pos[0, 0].item() - self.vocab_size]}')
+            # if not nan_pos.shape[0] == 0:
+            #     if nan_pos[0, 0].item() >= self.vocab_size:
+            #         sys.stderr.write(f'error phrase: {phrase_list[nan_pos[0, 0].item() - self.vocab_size]}')
             sys.stderr.write(f"query has nan: {torch.isnan(query).any()}\n")
             sys.stderr.write(f"query nan pos: {torch.nonzero(torch.isnan(query)).squeeze()}\n")
             sys.stderr.write(f"token emb has nan: {torch.isnan(token_reps).any()}\n")
@@ -196,7 +225,7 @@ class CopyisallyouneedPrefixOnly(nn.Module):
     def evaluate(self, quiet=True):
         self.model.eval()
 
-        data_fn = f'{self.args["training_data_dir"]}/validation_tok_{self.args["model_size"]}'
+        data_fn = f'/apdcephfs/share_916081/ponybwcao/phrase_extraction/data/minipile/match_result_tok/validation_tok_small'
         with open(data_fn) as f:
             dev_data_queue = f.readlines()
         # 966 (1024)
@@ -232,7 +261,9 @@ class CopyisallyouneedPrefixOnly(nn.Module):
         max_suffix_length = 72
         embeddings = embeddings.cuda()
         tok_reps = self.token_embeddings
-        if self.dim_proj is not None:
+        if self.args['sep_proj']:
+            tok_reps = self.token_proj(tok_reps)
+        else:
             tok_reps = self.dim_proj(tok_reps)
         candidate_reps = torch.vstack([tok_reps, embeddings])
         # print(candidate_reps.shape) # torch.Size([70063, 128])
@@ -258,7 +289,9 @@ class CopyisallyouneedPrefixOnly(nn.Module):
             gpt2_mask = gpt2_mask.cuda()
             gpt_reps = \
             self.model(input_ids=ids, attention_mask=gpt2_mask, output_hidden_states=True).hidden_states[-1]
-            if self.dim_proj is not None:
+            if self.args['sep_proj']:
+                gpt_reps = self.prefix_proj(gpt_reps)
+            else:
                 gpt_reps = self.dim_proj(gpt_reps)
             AR_loss, acc = self.get_token_loss(ids, gpt_reps, gpt2_mask, tok_reps, do_eval=True)
             logits_ = torch.matmul(gpt_reps, candidate_reps.t())

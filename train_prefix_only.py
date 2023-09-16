@@ -30,6 +30,7 @@ def parser_args():
     parser.add_argument('--l2_penalty', type=str2bool, default=False)
     parser.add_argument('--random_initialize', type=str2bool, default=False)
     parser.add_argument('--normalize', type=str2bool, default=False)
+    parser.add_argument('--sep_proj', type=str2bool, default=False)
     parser.add_argument('--FN', type=str2bool, default=True)
     parser.add_argument('--data_file_num', type=int, default=8)
     parser.add_argument('--temp', type=float, default=1.0)
