@@ -33,7 +33,7 @@ def parser_args():
     parser.add_argument('--testset', type=str)
     parser.add_argument('--model', type=str, default='copyisallyouneed')
     parser.add_argument('--training_data_dir', type=str, default='/apdcephfs/share_916081/shared_info/ponybwcao/data/8split_all_phrase_ref_check_valid')
-    parser.add_argument('--model_name', type=str, default='best_0913_EM2_merged_FN_false_l2_false_beta_0.8_gamma_4_small_bs2_temp2.0_focal_loss_lr1e-4_500000')
+    parser.add_argument('--model_name', type=str, default='best_0913_EM2_merged_FN_false_l2_false_beta_0.8_gamma_4_small_bs2_temp2.0_focal_loss_lr1e-4_1000000')
     parser.add_argument('--model_size', type=str, default='small')
     parser.add_argument('--decoding_method', type=str, default='nucleus_sampling')
     parser.add_argument('--local_rank', type=int)
@@ -41,17 +41,20 @@ def parser_args():
     parser.add_argument('--device_idx', type=int)
     parser.add_argument('--chunk_idx', type=int)
     parser.add_argument('--phrase_dim', type=int, default=128)
-    parser.add_argument('--max_gen_len', type=int, default=64)
+    parser.add_argument('--max_gen_len', type=int, default=128)
+    parser.add_argument('--run', type=int, default=1)
     parser.add_argument('--nworker', type=int)
     parser.add_argument('--cluster_idx', type=int)
     parser.add_argument('--topk', type=int, default=128)
-    parser.add_argument('--phrase_threshold', type=float, default=0.9)
+    parser.add_argument('--prefix_length', type=int, default=128)
+    parser.add_argument('--phrase_threshold', type=float, default=0.2)
     parser.add_argument('--start', type=int)
     parser.add_argument('--end', type=int)
     parser.add_argument('--mode', type=str)
     parser.add_argument('--index_type', type=str, default='pq')
     parser.add_argument('--random_initialize', type=str2bool, default=False)
     parser.add_argument('--sep_proj', type=str2bool, default=False)
+    parser.add_argument('--adaptive_threshold', type=str2bool, default=False)
     return parser.parse_args()
 
 def encode_phrase(**args):
@@ -238,8 +241,10 @@ def generation(**args):
     phrase_norm = torch.norm(phrase_embedding, dim=-1)
     print('token norm:', torch.mean(tok_norm), torch.max(tok_norm))
     print('phrase norm:', torch.mean(phrase_norm), torch.max(phrase_norm))
-
-    prefix_length = 128
+    if args['adaptive_threshold']:
+        print(f'Generate with adaptive phrase thresholds.')
+        
+    prefix_length = args['prefix_length']
     test_num = -1
     batch_size = 16
     phrase_threshold = args['phrase_threshold']
@@ -252,7 +257,7 @@ def generation(**args):
             line = json.loads(line)['text']
             ids = agent.model.tokenizer.encode(line, add_special_tokens=False)
             prefix, reference = ids[:prefix_length], ids[prefix_length:]
-            if len(prefix) == prefix_length:
+            if len(prefix) == prefix_length and len(reference) >= args['max_gen_len']:
                 prefix = agent.model.tokenizer.decode(prefix)
                 reference = agent.model.tokenizer.decode(reference[:args['max_gen_len']])
                 texts.append((prefix, reference))
@@ -265,7 +270,10 @@ def generation(**args):
         batch_texts = texts[st: end]
         batch_prefix = [x[0] for x in batch_texts]
         batch_reference = [x[1] for x in batch_texts]
-        batch_output, batch_candidates, time_cost, phrase_cnt, tok_cnt, phrase_tok_cnt = agent.batch_retrieve_one_phrase(batch_prefix, retriever, phrase_list, token_embs.cuda(), decoding_method=args["decoding_method"], top_k=0, top_p=0.95, temp=1., get_time_cost=True, phrase_threshold=phrase_threshold, topk_phrase=topk_phrase)
+        if args['adaptive_threshold']:
+            batch_output, batch_candidates, time_cost, phrase_cnt, tok_cnt, phrase_tok_cnt = agent.batch_retrieve_one_phrase_adaptive(batch_prefix, retriever, phrase_list, token_embs.cuda(), decoding_method=args["decoding_method"], top_k=0, top_p=0.95, temp=1., get_time_cost=True, topk_phrase=topk_phrase)
+        else:
+            batch_output, batch_candidates, time_cost, phrase_cnt, tok_cnt, phrase_tok_cnt = agent.batch_retrieve_one_phrase(batch_prefix, retriever, phrase_list, token_embs.cuda(), decoding_method=args["decoding_method"], top_k=0, top_p=0.95, temp=1., get_time_cost=True, phrase_threshold=phrase_threshold, topk_phrase=topk_phrase)
         for prefix, reference, output, candidates in zip(batch_prefix, batch_reference, batch_output, batch_candidates):
             # print(prefix)
             # print('-'*30)
@@ -297,7 +305,7 @@ def generation_gpt2(**args):
     agent.model.model.eval()
     print(f'[!] init model over')
 
-    prefix_length = 128
+    prefix_length = args['prefix_length']
     test_num = -1
     batch_size = 16
     collection = []
@@ -308,13 +316,14 @@ def generation_gpt2(**args):
             line = json.loads(line)['text']
             ids = agent.model.tokenizer.encode(line, add_special_tokens=False)
             prefix, reference = ids[:prefix_length], ids[prefix_length:]
-            if len(prefix) == prefix_length:
+            if len(prefix) == prefix_length and len(reference) >= args['max_gen_len']:
                 prefix = agent.model.tokenizer.decode(prefix)
                 reference = agent.model.tokenizer.decode(reference[:args['max_gen_len']])
                 texts.append((prefix, reference))
                 if len(texts) == test_num:
                     break
     print(f'[!] collect {len(texts)} valid samples which have at least {prefix_length} tokens in prefix')
+    print()
     t1 = time()
     for st in tqdm(range(0, len(texts), batch_size)):
         end = min(st + batch_size, len(texts))
@@ -777,19 +786,20 @@ def general_viterbi_forward(one_choice_result):
     #         if len(x[0].split()) == 1:
     #             dp[0] += x[1] # phrase prob
     # dp[0] = np.log(dp[0])
+    alpha = 0 #1e-10
     for tok_idx in range(tok_num): # cur token
         if tok_idx == 0:
             dp[tok_idx] = tok_result[tok_idx][1]
         else:
-            dp[tok_idx] = np.exp(dp[tok_idx - 1] + np.log(tok_result[tok_idx][1] + 1e-10))
+            dp[tok_idx] = np.exp(dp[tok_idx - 1] + np.log(tok_result[tok_idx][1] + alpha))
         for prev_tok_idx in range(tok_idx + 1): # generate phrase
             for phrase, prob, tok_num in phrase_result[prev_tok_idx]:
                 if tok_num == tok_idx - prev_tok_idx + 1:
                     if prev_tok_idx == 0:
                         dp[tok_idx] += prob
                     else:
-                        dp[tok_idx] += np.exp(dp[prev_tok_idx - 1] + np.log(prob + 1e-10))
-        dp[tok_idx] = np.log(dp[tok_idx] + 1e-10)
+                        dp[tok_idx] += np.exp(dp[prev_tok_idx - 1] + np.log(prob + alpha))
+        dp[tok_idx] = np.log(dp[tok_idx] + alpha)
     score = dp[-1] / tok_num
     return score
 
@@ -951,81 +961,86 @@ def OBQA_test(**args):
     max_length = 1024
     max_suffix_length = 72
     start_time = time()
+    test_batch_size = 16
 
     dataset_name = args['testset']
-    dataset = load_QA_dataset(dataset_name)
+    if dataset_name == 'wizard':
+        dataset = load_wizard()
+    else:
+        dataset = load_QA_dataset(dataset_name)
     print(f'load {len(dataset)} examples from {dataset_name}')
 
     results = []
     phrase_cnt = 0
+    pred_results = []
     for item in tqdm(dataset, desc=dataset_name):
         question = item['question']
         choices = item['choices']
         gt = item['label']
-        text_list = [question + ' ' + x for x in choices]
+        all_text_list = [question + ' ' + x for x in choices]
+        for st in range(0, len(all_text_list), test_batch_size):
+            text_list = all_text_list[st: st + test_batch_size]
+            encoded_dict = agent.model.tokenizer(text_list, return_attention_mask=False, return_offsets_mapping=True)
+            ids = encoded_dict['input_ids']
+            ids = [x[-max_length:] for x in ids]
+            all_st_char = pad_sequence([torch.LongTensor([y[0] for y in x[-max_length:]]) for x in encoded_dict['offset_mapping']], padding_value=-1, batch_first=True)
+            all_length = [len(x) for x in ids]
+            all_gpt_ids = pad_sequence([torch.LongTensor(x) for x in ids], padding_value=agent.model.tokenizer.eos_token_id, batch_first=True)
+            all_gpt2_mask = pad_sequence([torch.ones(len(x)).to(torch.long) for x in ids], padding_value=0, batch_first=True)
+            output = agent.model.model(input_ids=all_gpt_ids.cuda(), attention_mask=all_gpt2_mask.cuda(), output_hidden_states=True)
+            hidden = output['hidden_states'][-1] # (B, S, H)
+            if args['sep_proj']:
+                hidden = agent.model.prefix_proj(hidden)
+            else:
+                hidden = agent.model.dim_proj(hidden)
 
-        encoded_dict = agent.model.tokenizer(text_list, return_attention_mask=False, return_offsets_mapping=True)
-        ids = encoded_dict['input_ids']
-        ids = [x[-max_length:] for x in ids]
-        all_st_char = pad_sequence([torch.LongTensor([y[0] for y in x[-max_length:]]) for x in encoded_dict['offset_mapping']], padding_value=-1, batch_first=True)
-        all_length = [len(x) for x in ids]
-        all_gpt_ids = pad_sequence([torch.LongTensor(x) for x in ids], padding_value=agent.model.tokenizer.eos_token_id, batch_first=True)
-        all_gpt2_mask = pad_sequence([torch.ones(len(x)).to(torch.long) for x in ids], padding_value=0, batch_first=True)
-        output = agent.model.model(input_ids=all_gpt_ids.cuda(), attention_mask=all_gpt2_mask.cuda(), output_hidden_states=True)
-        hidden = output['hidden_states'][-1] # (B, S, H)
-        if args['sep_proj']:
-            hidden = agent.model.prefix_proj(hidden)
-        else:
-            hidden = agent.model.dim_proj(hidden)
+            query = hidden[:, :-1].reshape(-1, hidden.shape[-1])
+            query_mask = all_gpt2_mask[:, 1:].reshape(-1).to(torch.bool)
+            query = query[query_mask]
+            label = all_gpt_ids[:, 1:].reshape(-1)[query_mask]
+            st_char_map = all_st_char[:, 1:].reshape(-1)[query_mask]
+            
+            D, I = retriever.search(query.cpu(), topk)
+            token_ip = torch.matmul(query, token_embs.t())
+            logits = torch.hstack([token_ip, D.cuda()])
+            probs = torch.softmax(logits, dim=-1).cpu()
 
-        query = hidden[:, :-1].reshape(-1, hidden.shape[-1])
-        query_mask = all_gpt2_mask[:, 1:].reshape(-1).to(torch.bool)
-        query = query[query_mask]
-        label = all_gpt_ids[:, 1:].reshape(-1)[query_mask]
-        st_char_map = all_st_char[:, 1:].reshape(-1)[query_mask]
-        
-        D, I = retriever.search(query.cpu(), topk)
-        token_ip = torch.matmul(query, token_embs.t())
-        logits = torch.hstack([token_ip, D.cuda()])
-        probs = torch.softmax(logits, dim=-1).cpu()
+            cur_idx = 0
+            for instance_idx, length in enumerate(all_length):
+                st_idx = cur_idx
+                end_idx = st_idx + length - 1
+                input_text = text_list[instance_idx]
+                sub_probs = probs[st_idx: end_idx]
+                sub_label = label[st_idx: end_idx]
+                sub_st_char_map = st_char_map[st_idx: end_idx].tolist()
+                sub_I = I[st_idx: end_idx].tolist()
+                one_result = {'token_result': [], 'phrase_result': []}
+                for tok_idx in range(len(sub_probs)):
+                    prob_ = sub_probs[tok_idx]
+                    label_ = sub_label[tok_idx]
+                    st_char_ = sub_st_char_map[tok_idx]
+                    suffix_ = input_text[st_char_: st_char_ + max_suffix_length]
+                    has_white_space = suffix_.startswith(' ')
+                    suffix_ = suffix_.lstrip() + ' '
+                    retrieved_phrases = [phrase_list[x] for x in sub_I[tok_idx]]
 
-        pred_results = []
-        cur_idx = 0
-        for instance_idx, length in enumerate(all_length):
-            st_idx = cur_idx
-            end_idx = st_idx + length - 1
-            input_text = text_list[instance_idx]
-            sub_probs = probs[st_idx: end_idx]
-            sub_label = label[st_idx: end_idx]
-            sub_st_char_map = st_char_map[st_idx: end_idx].tolist()
-            sub_I = I[st_idx: end_idx].tolist()
-            one_result = {'token_result': [], 'phrase_result': []}
-            for tok_idx in range(len(sub_probs)):
-                prob_ = sub_probs[tok_idx]
-                label_ = sub_label[tok_idx]
-                st_char_ = sub_st_char_map[tok_idx]
-                suffix_ = input_text[st_char_: st_char_ + max_suffix_length]
-                has_white_space = suffix_.startswith(' ')
-                suffix_ = suffix_.lstrip() + ' '
-                retrieved_phrases = [phrase_list[x] for x in sub_I[tok_idx]]
-
-                tok_prob = prob_[label_]
-                phrase_result = []
-                for phrase_idx, phrase in enumerate(retrieved_phrases):
-                    if suffix_.startswith(phrase + ' '):
-                        phrase_cnt += 1
-                        phrase_prob_ = prob_[len(token_embs) + phrase_idx].item()
-                        if has_white_space:
-                            phrase_tokens = agent.model.tokenizer(' ' + phrase, return_attention_mask=False)['input_ids']
-                        else:
-                            phrase_tokens = agent.model.tokenizer(phrase, return_attention_mask=False)['input_ids']
-                        tok_num = len(phrase_tokens)
-                        phrase_result.append([phrase, phrase_prob_, tok_num])
-                        print(suffix_, phrase, phrase_prob_, tok_num, has_white_space)
-                one_result['token_result'].append([label_, tok_prob.item()])
-                one_result['phrase_result'].append(phrase_result)
-            pred_results.append(one_result)
-            cur_idx = end_idx
+                    tok_prob = prob_[label_]
+                    phrase_result = []
+                    for phrase_idx, phrase in enumerate(retrieved_phrases):
+                        if suffix_.startswith(phrase + ' '):
+                            phrase_cnt += 1
+                            phrase_prob_ = prob_[len(token_embs) + phrase_idx].item()
+                            if has_white_space:
+                                phrase_tokens = agent.model.tokenizer(' ' + phrase, return_attention_mask=False)['input_ids']
+                            else:
+                                phrase_tokens = agent.model.tokenizer(phrase, return_attention_mask=False)['input_ids']
+                            tok_num = len(phrase_tokens)
+                            phrase_result.append([phrase, phrase_prob_, tok_num])
+                            # print(suffix_, phrase, phrase_prob_, tok_num, has_white_space)
+                    one_result['token_result'].append([label_, tok_prob.item()])
+                    one_result['phrase_result'].append(phrase_result)
+                pred_results.append(one_result)
+                cur_idx = end_idx
         all_score = []
         for x in pred_results:
             score = general_viterbi_forward(x)
@@ -1036,6 +1051,193 @@ def OBQA_test(**args):
         results.append(gt == pred)
     print(f'{phrase_cnt} phrase retrieved.')
     print(sum(results) / len(results))
+
+@torch.no_grad()
+def OBQA_test_prefix_only(**args):
+    args['mode'] = 'test'
+    config = load_config(args)
+    args.update(config)
+    agent = load_model(args)
+    agent.load_model(f'/apdcephfs/share_916081/ponybwcao/tmp/copyisallyouneed_v2/ckpt/wikipedia/copyisallyouneed/train/{args["model_name"]}.pt')
+    agent.model.eval()
+    print(f'[!] init model over')
+
+    token_embs = agent.model.get_token_reps().detach()
+
+    # processing
+    batch_size = 64
+    topk = args['topk']
+    stride = 256
+    max_length = 1024
+    max_suffix_length = 72
+    start_time = time()
+    test_batch_size = 16
+
+    dataset_name = args['testset']
+    if dataset_name == 'wizard':
+        dataset = load_wizard()
+    else:
+        dataset = load_QA_dataset(dataset_name)
+    print(f'load {len(dataset)} examples from {dataset_name}')
+
+    results = []
+    gen_loss_fct = nn.CrossEntropyLoss()
+    for item in tqdm(dataset, desc=dataset_name):
+        question = item['question']
+        choices = item['choices']
+        gt = item['label']
+        all_text_list = [question + ' ' + x for x in choices]
+        all_score = []
+        for st in range(0, len(all_text_list), test_batch_size):
+            text_list = all_text_list[st: st + test_batch_size]
+            encoded_dict = agent.model.tokenizer(text_list, return_attention_mask=False, return_offsets_mapping=True)
+            ids = encoded_dict['input_ids']
+            ids = [x[-max_length:] for x in ids]
+            all_length = [len(x) for x in ids]
+            all_gpt_ids = pad_sequence([torch.LongTensor(x) for x in ids], padding_value=agent.model.tokenizer.eos_token_id, batch_first=True)
+            all_gpt2_mask = pad_sequence([torch.ones(len(x)).to(torch.long) for x in ids], padding_value=0, batch_first=True)
+            output = agent.model.model(input_ids=all_gpt_ids.cuda(), attention_mask=all_gpt2_mask.cuda(), output_hidden_states=True)
+            hidden = output['hidden_states'][-1] # (B, S, H)
+            if args['sep_proj']:
+                hidden = agent.model.prefix_proj(hidden)
+            else:
+                hidden = agent.model.dim_proj(hidden)
+
+            query = hidden[:, :-1].reshape(-1, hidden.shape[-1])
+            query_mask = all_gpt2_mask[:, 1:].reshape(-1).to(torch.bool)
+            query = query[query_mask]
+            label = all_gpt_ids[:, 1:].reshape(-1)[query_mask]
+            
+            logits = torch.matmul(query, token_embs.t())
+            probs = torch.softmax(logits, dim=-1)#.cpu()
+            cur_idx = 0
+            for instance_idx, length in enumerate(all_length):
+                st_idx = cur_idx
+                end_idx = st_idx + length - 1
+
+                CE_loss = gen_loss_fct(
+                    logits[st_idx: end_idx], 
+                    label[st_idx: end_idx].cuda()
+                )
+                all_score.append(CE_loss.item())
+                cur_idx = end_idx
+        pred = int(np.argmin(all_score))
+        # output_f.write(json.dumps({'pred': pred, 'score': all_score, **item}, ensure_ascii=False) + '\n')
+        results.append(gt == pred)
+    print(sum(results) / len(results))
+
+@torch.no_grad()
+def OBQA_test_all(**args):
+    args['mode'] = 'test'
+    config = load_config(args)
+    args.update(config)
+    agent = load_model(args)
+    agent.load_model(f'/apdcephfs/share_916081/ponybwcao/tmp/copyisallyouneed_v2/ckpt/wikipedia/copyisallyouneed/train/{args["model_name"]}.pt')
+    agent.model.eval()
+    print(f'[!] init model over')
+
+    phrase_list = load_emb('/apdcephfs/share_916081/ponybwcao/phrase_extraction/data/wikipedia/phrase_embedding_index/PCA_phrase_merged.pkl')
+    token_embs = agent.model.get_token_reps().detach()
+    phrase_embedding = np.load('/apdcephfs/share_916081/ponybwcao/phrase_extraction/data/wikipedia/phrase_embedding_index/PCA_emb_merged_save.npy')
+    phrase_embedding = torch.from_numpy(phrase_embedding)
+    retriever = build_index([1, 2, 3])
+    # retriever.add(token_embs)
+    retriever.add(phrase_embedding)
+    # retriever.add(torch.vstack([token_embs, phrase_embedding]))
+    print(f'[!] init retriever over')
+
+    # processing
+    batch_size = 64
+    topk = args['topk']
+    max_length = 1024
+    max_suffix_length = 72
+    start_time = time()
+    print('='*20, 'k:', topk, '='*20)
+    # for dataset_name in ['medmcqa', 'medusmile']:
+    for dataset_name in ['medmcqa', 'medusmile', 'ai2_arc_challenge', 'openbookqa', 'truthfulqa']:
+        dataset = load_QA_dataset(dataset_name)
+        print(f'load {len(dataset)} examples from {dataset_name}')
+
+        results = []
+        phrase_cnt = 0
+        for item in tqdm(dataset, desc=dataset_name):
+            question = item['question']
+            choices = item['choices']
+            gt = item['label']
+            text_list = [question + ' ' + x for x in choices]
+
+            encoded_dict = agent.model.tokenizer(text_list, return_attention_mask=False, return_offsets_mapping=True)
+            ids = encoded_dict['input_ids']
+            ids = [x[-max_length:] for x in ids]
+            all_st_char = pad_sequence([torch.LongTensor([y[0] for y in x[-max_length:]]) for x in encoded_dict['offset_mapping']], padding_value=-1, batch_first=True)
+            all_length = [len(x) for x in ids]
+            all_gpt_ids = pad_sequence([torch.LongTensor(x) for x in ids], padding_value=agent.model.tokenizer.eos_token_id, batch_first=True)
+            all_gpt2_mask = pad_sequence([torch.ones(len(x)).to(torch.long) for x in ids], padding_value=0, batch_first=True)
+            output = agent.model.model(input_ids=all_gpt_ids.cuda(), attention_mask=all_gpt2_mask.cuda(), output_hidden_states=True)
+            hidden = output['hidden_states'][-1] # (B, S, H)
+            if args['sep_proj']:
+                hidden = agent.model.prefix_proj(hidden)
+            else:
+                hidden = agent.model.dim_proj(hidden)
+
+            query = hidden[:, :-1].reshape(-1, hidden.shape[-1])
+            query_mask = all_gpt2_mask[:, 1:].reshape(-1).to(torch.bool)
+            query = query[query_mask]
+            label = all_gpt_ids[:, 1:].reshape(-1)[query_mask]
+            st_char_map = all_st_char[:, 1:].reshape(-1)[query_mask]
+            
+            D, I = retriever.search(query.cpu(), topk)
+            token_ip = torch.matmul(query, token_embs.t())
+            logits = torch.hstack([token_ip, D.cuda()])
+            probs = torch.softmax(logits, dim=-1).cpu()
+
+            pred_results = []
+            cur_idx = 0
+            for instance_idx, length in enumerate(all_length):
+                st_idx = cur_idx
+                end_idx = st_idx + length - 1
+                input_text = text_list[instance_idx]
+                sub_probs = probs[st_idx: end_idx]
+                sub_label = label[st_idx: end_idx]
+                sub_st_char_map = st_char_map[st_idx: end_idx].tolist()
+                sub_I = I[st_idx: end_idx].tolist()
+                one_result = {'token_result': [], 'phrase_result': []}
+                for tok_idx in range(len(sub_probs)):
+                    prob_ = sub_probs[tok_idx]
+                    label_ = sub_label[tok_idx]
+                    st_char_ = sub_st_char_map[tok_idx]
+                    suffix_ = input_text[st_char_: st_char_ + max_suffix_length]
+                    has_white_space = suffix_.startswith(' ')
+                    suffix_ = suffix_.lstrip() + ' '
+                    retrieved_phrases = [phrase_list[x] for x in sub_I[tok_idx]]
+
+                    tok_prob = prob_[label_]
+                    phrase_result = []
+                    for phrase_idx, phrase in enumerate(retrieved_phrases):
+                        if suffix_.startswith(phrase + ' '):
+                            phrase_cnt += 1
+                            phrase_prob_ = prob_[len(token_embs) + phrase_idx].item()
+                            if has_white_space:
+                                phrase_tokens = agent.model.tokenizer(' ' + phrase, return_attention_mask=False)['input_ids']
+                            else:
+                                phrase_tokens = agent.model.tokenizer(phrase, return_attention_mask=False)['input_ids']
+                            tok_num = len(phrase_tokens)
+                            phrase_result.append([phrase, phrase_prob_, tok_num])
+                            # print(suffix_, phrase, phrase_prob_, tok_num, has_white_space)
+                    one_result['token_result'].append([label_, tok_prob.item()])
+                    one_result['phrase_result'].append(phrase_result)
+                pred_results.append(one_result)
+                cur_idx = end_idx
+            all_score = []
+            for x in pred_results:
+                score = general_viterbi_forward(x)
+                all_score.append(score)
+            # print(all_score)
+            pred = int(np.argmax(all_score))
+            # output_f.write(json.dumps({'pred': pred, 'score': all_score, **item}, ensure_ascii=False) + '\n')
+            results.append(gt == pred)
+        print(f'{phrase_cnt} phrase retrieved.')
+        print(sum(results) / len(results))
 
 @torch.no_grad()
 def OBQA_test_global_topk(**args):
@@ -1278,7 +1480,7 @@ def OBQA_test_gpt2(**args):
     config = load_config(args)
     args.update(config)
     agent = load_model(args)
-    # agent.load_model(f'/apdcephfs/share_916081/ponybwcao/PLM/GPT2-small/pytorch_model.bin')
+    agent.load_model(f'/apdcephfs/share_916081/ponybwcao/Copyisallyouneed/ckpt/wikitext103/gpt2/best_cog_baseline_100000.pt')
     agent.model.model.eval()
     print(f'[!] init model over')
     # processing
@@ -2015,17 +2217,13 @@ if __name__ == "__main__":
         torch.distributed.init_process_group(backend='nccl', init_method='env://')
         args['worker_idx'] = args['local_rank']
         encode_phrase(**args)
-    elif args['mode'] == 'generation_test':
-        result = generation_test(**args)
-        with open(f'/apdcephfs/share_916081/shared_info/ponybwcao/Copyisallyouneed/raw_files/random_runs_en_wiki_testset/{args["dataset"]}_copy_phrase_test_{args["decoding_method"]}_{args["model_name"]}.json', 'w') as f:
-            json.dump(result, f, indent=4, ensure_ascii=False)
     elif args['mode'] == 'generation':
         result = generation(**args)
-        with open(f'/apdcephfs/share_916081/ponybwcao/tmp/copyisallyouneed_v2/log/generation/v2_{args["decoding_method"]}_{args["topk"]}_{args["phrase_threshold"]}_{args["model_name"]}.json', 'w') as f:
+        with open(f'/apdcephfs/share_916081/ponybwcao/tmp/copyisallyouneed_v2/log/generation/our_{args["prefix_length"]}_{args["max_gen_len"]}_{args["decoding_method"]}_{args["topk"]}_{args["adaptive_threshold"]}_{args["phrase_threshold"]}_{args["model_name"]}_{args["run"]}.json', 'w') as f:
             json.dump(result, f, indent=4, ensure_ascii=False)
     elif args['mode'] == 'generation_gpt':
         result = generation_gpt2(**args)
-        with open(f'/apdcephfs/share_916081/ponybwcao/tmp/copyisallyouneed_v2/log/generation/gpt2_{args["decoding_method"]}.json', 'w') as f:
+        with open(f'/apdcephfs/share_916081/ponybwcao/tmp/copyisallyouneed_v2/log/generation/gpt2_{args["prefix_length"]}_{args["max_gen_len"]}_{args["decoding_method"]}_{args["run"]}.json', 'w') as f:
             json.dump(result, f, indent=4, ensure_ascii=False)
     elif args["mode"] == 'merge':
         merge_result()
@@ -2063,6 +2261,10 @@ if __name__ == "__main__":
     elif args["mode"] == 'obqa':
         # OBQA_test_global_topk(**args)
         OBQA_test(**args)
+    elif args["mode"] == 'obqa_prefix_only':
+        OBQA_test_prefix_only(**args)
+    elif args["mode"] == 'obqa_all':
+        OBQA_test_all(**args)
     elif args["mode"] == 'obqag':
         OBQA_test_grounded(**args)
     elif args["mode"] == 'obqa_gpt':

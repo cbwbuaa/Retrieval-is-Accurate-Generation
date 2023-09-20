@@ -14,7 +14,9 @@ def parser_args():
     parser = argparse.ArgumentParser(description='train parameters')
     parser.add_argument('--model_size', type=str, default='small')
     parser.add_argument('--dataset', type=str)
-    parser.add_argument('--search_topk', type=int, default=1024)
+    parser.add_argument('--search_topk', type=int, default=128)
+    parser.add_argument('--prefix_length', type=int, default=128)
+    parser.add_argument('--max_gen_len', type=int, default=128)
     parser.add_argument('--lambda', type=float, default=0.118)
     parser.add_argument('--alpha', type=float, default=0.00785)
     parser.add_argument('--decoding_method', type=str, default='nucleus_sampling')
@@ -165,6 +167,19 @@ class KNNLM(nn.Module):
         knn_logits = knn_logits.sum(dim=0)    # [V]
         new_logits = self.args['lambda'] * knn_logits + (1 - self.args['lambda']) * F.softmax(logits, dim=-1)
         return new_logits
+    
+    @torch.no_grad()
+    def generate_new_logits_batch(self, logits, hidden, topk=10, temp=100, ids=None):
+        dists, cands = self.index.search(hidden.cpu().numpy(), topk)
+        cands = torch.LongTensor([[int(self.next_tokens[i]) for i in x] for x in cands]).cuda()
+        dists = torch.tensor(dists).cuda() # B, K
+        knn_logits = torch.zeros(len(logits), topk, len(self.tokenizer)).cuda()    # [B, K, V]
+        knn_probs = F.softmax(-self.args['alpha']*dists, dim=-1) # B, K
+        for instance_idx in range(len(logits)):
+            knn_logits[instance_idx, range(topk), cands[instance_idx]] = knn_probs[instance_idx]
+        knn_logits = knn_logits.sum(dim=1)    # [B, V]
+        new_logits = self.args['lambda'] * knn_logits + (1 - self.args['lambda']) * F.softmax(logits, dim=-1)
+        return new_logits
 
     @torch.no_grad()
     def greedy_search(self, ids, max_length):
@@ -189,7 +204,7 @@ class KNNLM(nn.Module):
         return string
 
     @torch.no_grad()
-    def nucleus_sampling(self, ids, max_length, top_p):
+    def nucleus_sampling(self, ids, max_length, top_p, get_time_cost=False):
         generated = []
         past_key_values = None
         for _ in range(max_length):
@@ -210,6 +225,31 @@ class KNNLM(nn.Module):
             ids = torch.multinomial(filtered_logits, num_samples=1).reshape(1, 1)
             generated.append(ids.item())
         string = self.tokenizer.decode(generated)
+        return string
+
+    @torch.no_grad()
+    def nucleus_sampling_batch(self, ids, max_length, top_p, get_time_cost=False):
+        generated = [[] for _ in range(len(ids))]
+        for _ in range(max_length):
+            output = self.model(
+                input_ids=ids,
+                attention_mask=torch.ones_like(ids),
+                output_hidden_states=True
+            )
+            hidden = output['hidden_states'][-1][:, -1, :]
+            next_token_logits = output['logits'][:, -1, :]
+            next_token_logits = self.generate_new_logits_batch(next_token_logits, hidden, topk=self.args['search_topk'], ids=ids)
+            new_ids = []
+            for instance_idx in range(len(ids)):
+                filtered_logits = top_k_top_p_filtering(next_token_logits[instance_idx], top_k=0, top_p=top_p, filter_value=0)
+                filtered_logits[self.unk] = 0
+                # no softmax for nucleus sampling
+                new_id = torch.multinomial(filtered_logits, num_samples=1)
+                generated[instance_idx].append(new_id.item())
+                new_ids.append(new_id)
+            new_ids = torch.vstack(new_ids)
+            ids = torch.hstack([ids, new_ids])
+        string = [self.tokenizer.decode(x) for x in generated]
         return string
 
     @torch.no_grad()
@@ -247,13 +287,38 @@ class KNNLM(nn.Module):
             )
         return string, time() - bt
 
+    @torch.no_grad()
+    def generate_batch(self, prefix, generate_length=128, decoding_method='nucleus_sampling', top_k=0, top_p=0.95, temp=1.0, get_time_cost=False):
+        # make sure prefixes have the same token num
+        encoded_dict = self.tokenizer(prefix, padding=True, return_tensors='pt')
+        input_ids = encoded_dict['input_ids'].cuda()
+        bt = time()
+        if decoding_method == 'nucleus_sampling':
+            string = self.nucleus_sampling_batch(
+                input_ids,
+                max_length=generate_length,
+                top_p=top_p,
+                get_time_cost=get_time_cost
+            )
+        elif decoding_method == 'greedy':
+            # string = self.greedy_search(
+            #     input_ids,
+            #     max_length=128,
+            #     get_time_cost=get_time_cost
+            # )
+            pass
+        return string, time() - bt
+
 @torch.no_grad()
 def main_generation(**args):
     kNN_LM = KNNLM(**args)
+    kNN_LM.tokenizer.pad_token = kNN_LM.tokenizer.eos_token
     print(f'[!] init model over, knnlm with lambda {args["lambda"]}')
 
-    prefix_length = 128
-    test_num = 100
+    prefix_length = args['prefix_length']
+    generate_length = args['max_gen_len']
+    test_num = -1
+    batch_size = 16
     collection = []
     with open(f'/apdcephfs/share_916081/ponybwcao/phrase_extraction/data/minipile/raw/test.jsonl') as f:
         # collect the valid prefixes
@@ -262,31 +327,31 @@ def main_generation(**args):
             line = json.loads(line)
             ids = kNN_LM.tokenizer.encode(line['text'], add_special_tokens=False)
             prefix, reference = ids[:prefix_length], ids[prefix_length:]
-            if len(prefix) == prefix_length:
+            if len(prefix) == prefix_length and len(reference) >= generate_length:
                 prefix = kNN_LM.tokenizer.decode(prefix)
-                reference = kNN_LM.tokenizer.decode(reference)
+                reference = kNN_LM.tokenizer.decode(reference[:generate_length])
                 texts.append((prefix, reference))
                 if len(texts) == test_num:
                     break
         print(f'[!] collect {len(texts)} valid samples which have at least {prefix_length} tokens in prefix')
 
     # texts = texts[:test_num]
-    output_path = f'/apdcephfs/share_916081/ponybwcao/tmp/copyisallyouneed_v2/log/knnlm/test{test_num}_{args["decoding_method"]}_{args["lambda"]}_{args["alpha"]}.jsonl'
-    if os.path.exists(output_path):
-        done_num = sum([1 for _ in open(output_path)])
-    else:
-        done_num = 0
-    with open(output_path, 'w') as fOut:  
-        for idx, (prefix, reference) in tqdm(enumerate(texts)):
-            if idx < done_num:
-                continue
-            text, time_cost = kNN_LM.generate(prefix, decoding_method=args['decoding_method'], top_k=-1, top_p=0.95, temp=1., get_time_cost=True)
-            fOut.write(json.dumps({
+    collection = []  
+    for st in tqdm(range(0, len(texts), batch_size)):
+        end = min(st + batch_size, len(texts))
+        batch_texts = texts[st: end]
+        batch_prefix = [x[0] for x in batch_texts]
+        batch_reference = [x[1] for x in batch_texts]
+
+        batch_output, time_cost = kNN_LM.generate_batch(batch_prefix, generate_length=generate_length, decoding_method=args['decoding_method'], top_k=-1, top_p=0.95, temp=1., get_time_cost=True)
+        for prefix, reference, output in zip(batch_prefix, batch_reference, batch_output):
+            collection.append({
                 'prefix': prefix, 
                 'reference': reference, 
-                'text': text,
-                'time_cost': time_cost
-            }, ensure_ascii=False) + '\n')
+                'text': output,
+                'time_cost': time_cost / len(batch_texts)
+            })
+    return collection
 
 @torch.no_grad()
 def MCQA(**args):
@@ -313,6 +378,8 @@ if __name__ == "__main__":
     args = vars(parser_args())
     mode = args['mode']
     if mode == 'generation':
-        main_generation(**args)
+        result = main_generation(**args)
+        with open(f'/apdcephfs/share_916081/ponybwcao/tmp/copyisallyouneed_v2/log/generation/kNNLM_{args["prefix_length"]}_{args["max_gen_len"]}_{args["search_topk"]}_{args["decoding_method"]}.json', 'w') as f:
+            json.dump(result, f, indent=4, ensure_ascii=False)
     elif mode == 'QA':
         MCQA(**args)
