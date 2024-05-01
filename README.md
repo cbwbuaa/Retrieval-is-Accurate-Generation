@@ -2,6 +2,7 @@ This is the official implementation of the [paper](https://arxiv.org/abs/2402.17
 ```
 Retrieval is Accurate Generation
 Bowen Cao, Deng Cai, Leyang Cui, Xuxin Cheng, Wei Bi, Yuexian Zou, Shuming Shi
+ICLR 2024
 ```
 
 We're still in the process of tidying up the code.
