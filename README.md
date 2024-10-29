@@ -9,9 +9,8 @@ Please see [our paper](https://arxiv.org/pdf/2402.17532) for more details.
 
 
 ## 🛠️ Installation
-In line with common practice, we use **weighted win-rate** as our performance metric; It uses an **evaluator** to compare the output of the target model against that of a **reference model**, and estimates the winning probability of the target model. Specifically, we employ the **gpt4_turbo** model as the evaluator and the reference model. We term the model's performance on the original prompt as ```original performance```. We also report the ```worst```, ```best```, ```average performances``` across all eleven prompts as well as the ```standard deviation```. For each metric, we average the results across all cases.
+To set up the environment, run the following command:
 
-To evaluate your own model, get model predictions for each of the paraphrases as well as the original query, and follow the instructions in [AlpacaEval](https://github.com/tatsu-lab/alpaca_eval) to obtain the weighted win-rate.
 
 ## 📈 Usage
 Here's a quick guide on how to use this repository:
