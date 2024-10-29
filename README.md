@@ -1,0 +1,22 @@
+# Retrieval is Accurate Generation
+
+This is the repository for our paper [Retrieval is Accurate Generation](https://arxiv.org/abs/2402.17532).
+
+Standard language models generate text by selecting tokens from a fixed, finite, and standalone vocabulary. We introduce a novel method that selects context-aware phrases from a collection of supporting documents. One of the most significant challenges for this paradigm shift is determining the training oracles, because a string of text can be segmented in various ways and each segment can be retrieved from numerous possible documents. To address this, we propose to initialize the training oracles using linguistic heuristics and, more importantly, bootstrap the oracles through iterative self-reinforcement. Extensive experiments show that our model not only outperforms standard language models on a variety of knowledge-intensive tasks but also demonstrates improved generation quality in open-ended text generation. For instance, compared to the standard language model counterpart, our model raises the accuracy from 23.47% to 36.27% on OpenbookQA, and improves the MAUVE score from 42.61% to 81.58% in open-ended text generation. Remarkably, our model also achieves the best performance and the lowest latency among several retrieval-augmented baselines. In conclusion, we assert that retrieval is more accurate generation and hope that our work will encourage further research on this new paradigm shift.
+
+Please see [our paper](https://arxiv.org/pdf/2402.17532) for more details.
+
+
+
+## 🛠️ Installation
+In line with common practice, we use **weighted win-rate** as our performance metric; It uses an **evaluator** to compare the output of the target model against that of a **reference model**, and estimates the winning probability of the target model. Specifically, we employ the **gpt4_turbo** model as the evaluator and the reference model. We term the model's performance on the original prompt as ```original performance```. We also report the ```worst```, ```best```, ```average performances``` across all eleven prompts as well as the ```standard deviation```. For each metric, we average the results across all cases.
+
+To evaluate your own model, get model predictions for each of the paraphrases as well as the original query, and follow the instructions in [AlpacaEval](https://github.com/tatsu-lab/alpaca_eval) to obtain the weighted win-rate.
+
+## 📈 Usage
+Here's a quick guide on how to use this repository:
+
+
+## 📬 Contact
+
+For any questions, feel free to open an issue or contact us directly at [bwcao@link.cuhk.edu.hk].
