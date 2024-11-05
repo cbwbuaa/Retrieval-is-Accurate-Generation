@@ -10,6 +10,9 @@ Please see [our paper](https://arxiv.org/pdf/2402.17532) for more details.
 
 ## 🛠️ Installation
 To set up the environment, run the following command:
+```
+pip3 install -r requirements.txt
+```
 
 
 ## 📈 Usage
