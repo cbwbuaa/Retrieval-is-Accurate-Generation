@@ -18,6 +18,13 @@ pip3 install -r requirements.txt
 ## 📈 Usage
 Here's a quick guide on how to use this repository:
 
+**Phrase Encoding:**
+```
+```
+**Training:**
+```
+bash scripts/train_pipeline.sh 0,1,2,3,4,5,6,7
+```
 
 ## 📬 Contact
 
