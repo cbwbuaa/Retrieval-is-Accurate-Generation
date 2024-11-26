@@ -6,8 +6,8 @@ import sys, collections, random, math
 import numpy as np
 import faiss
 from time import time
-sys.path.append('/apdcephfs/share_916081/ponybwcao/phrase_extraction/training')
-from DPR_encoding import DPREncoder as PhraseEncoder
+# sys.path.append('/apdcephfs/share_916081/ponybwcao/phrase_extraction/training')
+# from DPR_encoding import DPREncoder as PhraseEncoder
 import faiss.contrib.torch_utils
 from copy import deepcopy
 from QA_test import load_QA_dataset, load_wizard

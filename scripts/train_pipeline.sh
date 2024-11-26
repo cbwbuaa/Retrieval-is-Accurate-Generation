@@ -31,18 +31,12 @@ warmup_step=50000
 lr=1e-4
 prebatch_num=0
 phrase_dim=128
-# version=baseline
-# version=new_inbatch_prebatch${prebatch_phrase_num}
-# version=0516_cosine_prebatch${prebatch_phrase_num}_AllCandidates_${loss_type}_beta${beta}_inbatch_temp${temp}
-# version=0517_valid_AllCandidates_prebatch${prebatch_phrase_num}_${loss_type}_beta${beta}_inbatch_temp${temp}
-# version=0602_randomInit_shuffle_queue5k_mergedQ_eval1k_dim${phrase_dim}_${loss_type}_lr${lr}_prebatch${prebatch_step}_beta${beta}_warmup${warmup_step}_prenum${prebatch_num}_temp${temp}
-version=0606_continual_training
-# version=test
+version=test
 
-pretrain_model_path=/apdcephfs/share_916081/shared_info/ponybwcao/Copyisallyouneed/ckpt/wikitext103/copyisallyouneed/train_pipeline/best_0601_shuffle_queue5k_mergedQ_eval1k_dim128_focal_loss_lr1e-4_prebatch0_beta0.5_warmup50000_prenum0_temp2.0_400000.pt
-training_data_dir=/apdcephfs/share_916081/shared_info/ponybwcao/data/8split_all_phrase_ref_check_valid_merged
+# pretrain_model_path=/apdcephfs/share_916081/shared_info/ponybwcao/Copyisallyouneed/ckpt/wikitext103/copyisallyouneed/train_pipeline/best_0601_shuffle_queue5k_mergedQ_eval1k_dim128_focal_loss_lr1e-4_prebatch0_beta0.5_warmup50000_prenum0_temp2.0_400000.pt
+training_data_dir=path/to/data/8split_all_phrase_ref_check_valid_merged
 
-root_dir=/apdcephfs/share_916081/shared_info/ponybwcao/Copyisallyouneed
+root_dir=./ #/apdcephfs/share_916081/shared_info/ponybwcao/Copyisallyouneed
 # backup
 recoder_file=$root_dir/rest/$dataset/$model/recoder_train_$version.txt
 
@@ -54,6 +48,7 @@ recoder_file=$root_dir/rest/$dataset/$model/recoder_train_$version.txt
 # rm $root_dir/rest/$dataset/$model/$version/* 
 # rm -rf $root_dir/rest/$dataset/$model/$version 
 
+# adjust total_step and save_every according to the number of your training examples.
 gpu_ids=(${cuda//,/ })
 CUDA_VISIBLE_DEVICES=$cuda python3.8 -m torch.distributed.launch --nproc_per_node=${#gpu_ids[@]} --master_addr 127.0.0.1 --master_port 28445 train_pipeline.py \
     --pretrain_model_path $pretrain_model_path \

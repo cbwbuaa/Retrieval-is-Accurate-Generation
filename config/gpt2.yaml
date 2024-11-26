@@ -1,9 +1,9 @@
 tokenizer: 
-    en: /apdcephfs/share_916081/ponybwcao/PLM/GPT2-small
+    en: /path/to/GPT2-small
     # en: neulab/gpt2-finetuned-wikitext103
     zh: 123
 pretrained_model: 
-    en: /apdcephfs/share_916081/ponybwcao/PLM/GPT2-small
+    en: /path/to/GPT2-small
     # en: neulab/gpt2-finetuned-wikitext103
     zh: 123
 

@@ -1,19 +1,19 @@
 phrase_encoder_tokenizer: 
     zh: 123
-    en: /apdcephfs/share_916081/ponybwcao/PLM/bert-base-cased
+    en: /path/to/bert-base-cased
 phrase_encoder_model: 
     zh: 123
-    en: /apdcephfs/share_916081/ponybwcao/PLM/bert-base-cased
+    en: /path/to/bert-base-cased
 prefix_encoder_tokenizer: 
     zh: 123
     en: 
-        small: /apdcephfs/share_916081/ponybwcao/PLM/GPT2-small
-        medium: /apdcephfs/share_916081/ponybwcao/PLM/GPT2-medium
+        small: /path/to/GPT2-small
+        medium: /path/to/GPT2-medium
 prefix_encoder_model: 
     zh: 123
     en: 
-        small: /apdcephfs/share_916081/ponybwcao/PLM/GPT2-small
-        medium: /apdcephfs/share_916081/ponybwcao/PLM/GPT2-medium
+        small: /path/to/GPT2-small
+        medium: /path/to/GPT2-medium
 
 # pretrain configuration
 pretrain:

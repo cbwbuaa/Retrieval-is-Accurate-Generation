@@ -1,9 +1,9 @@
 tokenizer: 
-    en: /apdcephfs/share_916081/johntianlan/gpt2_english
-    zh: /apdcephfs/share_916081/johntianlan/gpt2-chinese-cluecorpussmall
+    en: /path/to/gpt2_english
+    zh: /path/to/gpt2-chinese-cluecorpussmall
 pretrained_model: 
-    en: /apdcephfs/share_916081/johntianlan/gpt2_english
-    zh: /apdcephfs/share_916081/johntianlan/gpt2-chinese-cluecorpussmall
+    en: /path/to/gpt2_english
+    zh: /path/to/gpt2-chinese-cluecorpussmall
 
 # test configuration
 # lambda and alpha hyper-parameters come from retro paper: https://arxiv.org/pdf/2112.04426.pdf
